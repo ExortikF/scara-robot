@@ -39,7 +39,7 @@ def main() -> int:
                     timeout=0.15, retries=1, device_id=device_id,
                 )
                 try:
-                    with ServoDrive(DriveConfig(serial)) as drive:
+                    with ServoDrive(DriveConfig(serial=serial)) as drive:
                         version = drive.read_param(reg.P_SOFTWARE_VERSION)
                 except (DriveError, OSError):
                     continue

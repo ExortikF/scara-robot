@@ -34,7 +34,7 @@ def main() -> int:
     serial = SerialConfig(
         port=args.port, baudrate=args.baud, parity=args.parity, device_id=args.id
     )
-    with ServoDrive(DriveConfig(serial)) as drive:
+    with ServoDrive(DriveConfig(serial=serial)) as drive:
         mode = drive.read_param(reg.P_CONTROL_MODE)
         print(f"P-004 (режим управления) = {mode}")
         if mode != reg.ControlMode.SPEED:

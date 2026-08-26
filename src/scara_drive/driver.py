@@ -19,7 +19,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from pymodbus.client import ModbusSerialClient
+from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 from pymodbus.exceptions import ModbusException
 
 from . import registers as reg
@@ -50,10 +50,45 @@ class SerialConfig:
 
 
 @dataclass
-class DriveConfig:
-    """Привязка драйвера к конкретной установке."""
+class TcpConfig:
+    """Параметры Modbus TCP.
 
-    serial: SerialConfig
+    Так подключаются через шлюз Ethernet<->RS-485 (USR-TCP232, Waveshare и
+    подобные). Для привода ничего не меняется: на его клеммах всё тот же
+    RS-485 и тот же набор регистров — Ethernet только довозит кадры до шлюза.
+
+    Framer при этом другой (SOCKET вместо RTU), но pymodbus выбирает его сам.
+    Некоторые шлюзы работают в «прозрачном» режиме и ждут RTU-кадр внутри
+    TCP — тогда нужен ``framer_rtu=True``.
+    """
+
+    host: str
+    port: int = 502
+    timeout: float = 1.0
+    retries: int = 3
+    device_id: int = 1
+    framer_rtu: bool = False
+
+
+@dataclass
+class DriveConfig:
+    """Привязка драйвера к конкретной установке.
+
+    Указывается ровно один транспорт: ``serial`` или ``tcp``.
+    """
+
+    serial: SerialConfig | None = None
+    tcp: TcpConfig | None = None
+
+    @property
+    def transport(self) -> "SerialConfig | TcpConfig":
+        if (self.serial is None) == (self.tcp is None):
+            raise ValueError("задайте ровно один транспорт: serial или tcp")
+        return self.serial or self.tcp  # type: ignore[return-value]
+
+    @property
+    def device_id(self) -> int:
+        return self.transport.device_id
 
     #: Регистр 16-битного слова команд. По умолчанию — из снятого дампа.
     cmd_register: int = reg.CMD_REGISTER
@@ -85,7 +120,8 @@ class DriveConfig:
 class ServoDrive:
     """Синхронный клиент привода. Используется как контекстный менеджер.
 
-    >>> cfg = DriveConfig(SerialConfig(port="/dev/tty.usbserial-A1"))
+    >>> cfg = DriveConfig(serial=SerialConfig(port="/dev/tty.usbserial-A1"))
+    >>> tcp = DriveConfig(tcp=TcpConfig(host="192.168.1.50"))   # через шлюз
     >>> with ServoDrive(cfg) as drive:            # doctest: +SKIP
     ...     drive.write_param(reg.P_CONTROL_MODE, reg.ControlMode.SPEED)
     ...     drive.run(speed=100)
@@ -94,16 +130,31 @@ class ServoDrive:
 
     def __init__(self, config: DriveConfig) -> None:
         self.config = config
-        s = config.serial
-        self._client = ModbusSerialClient(
-            port=s.port,
-            baudrate=s.baudrate,
-            parity=s.parity,
-            stopbits=s.stopbits,
-            bytesize=s.bytesize,
-            timeout=s.timeout,
-            retries=s.retries,
-        )
+        transport = config.transport
+        if isinstance(transport, SerialConfig):
+            self._client = ModbusSerialClient(
+                port=transport.port,
+                baudrate=transport.baudrate,
+                parity=transport.parity,
+                stopbits=transport.stopbits,
+                bytesize=transport.bytesize,
+                timeout=transport.timeout,
+                retries=transport.retries,
+            )
+            self._where = transport.port
+        else:
+            kwargs = {}
+            if transport.framer_rtu:
+                from pymodbus import FramerType
+                kwargs["framer"] = FramerType.RTU
+            self._client = ModbusTcpClient(
+                transport.host,
+                port=transport.port,
+                timeout=transport.timeout,
+                retries=transport.retries,
+                **kwargs,
+            )
+            self._where = f"{transport.host}:{transport.port}"
 
     # --- жизненный цикл ---------------------------------------------------
 
@@ -111,7 +162,7 @@ class ServoDrive:
         if not self._client.connect():
             raise DriveError(f"не открылся порт {self.config.serial.port}")
         log.info("порт %s открыт, slave id=%d",
-                 self.config.serial.port, self.config.serial.device_id)
+                 self.config.serial.port, self.config.device_id)
 
     def close(self) -> None:
         self._client.close()
@@ -134,7 +185,7 @@ class ServoDrive:
     def _read(self, address: int, count: int = 1) -> list[int]:
         try:
             rr = self._client.read_holding_registers(
-                address, count=count, device_id=self.config.serial.device_id
+                address, count=count, device_id=self.config.device_id
             )
         except ModbusException as exc:
             raise DriveError(f"чтение {address}: {exc}") from exc
@@ -147,7 +198,7 @@ class ServoDrive:
             raise ValueError(f"значение {value} не влезает в 16 бит")
         try:
             rr = self._client.write_register(
-                address, value, device_id=self.config.serial.device_id
+                address, value, device_id=self.config.device_id
             )
         except ModbusException as exc:
             raise DriveError(f"запись {value} в {address}: {exc}") from exc
