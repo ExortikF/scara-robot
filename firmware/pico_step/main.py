@@ -20,6 +20,7 @@
 
 from machine import Pin
 import rp2
+import select
 import sys
 
 VERSION = "pico_step 1"
@@ -34,6 +35,9 @@ AXES = {
 
 # Один шаг PIO-программы занимает 5 тактов автомата (2 + 2 + 1).
 CYCLES_PER_STEP = 5
+
+# Глубина очереди отрезков на ось.
+QUEUE_DEPTH = 4
 
 # PIO не тактуется медленнее sysclk/65536. Отсюда нижняя граница частоты шагов.
 MIN_STEP_HZ = 400
@@ -58,6 +62,7 @@ class Axis:
         self.dir = Pin(dir_pin, Pin.OUT, value=0)
         self.position = 0
         self._busy = False
+        self._queue = []
         self._step = Pin(step_pin, Pin.OUT, value=0)
         self._sm = rp2.StateMachine(index)
         self._configure(MIN_STEP_HZ)
@@ -82,10 +87,27 @@ class Axis:
     def busy(self):
         return self._busy
 
-    def move(self, steps, step_hz):
-        """Запустить отрезок. Знак steps задаёт направление."""
-        if self._busy:
-            raise ValueError("ось занята")
+    def enqueue(self, steps, step_hz):
+        """Поставить отрезок в очередь.
+
+        Очередь нужна для телеуправления: кадры приходят непрерывно, и
+        следующий должен быть готов до того, как кончится текущий, иначе
+        между отрезками появится пауза и движение станет рваным.
+        """
+        if len(self._queue) >= QUEUE_DEPTH:
+            raise ValueError("очередь полна")
+        self._queue.append((steps, step_hz))
+        self.service()
+        return len(self._queue)
+
+    def service(self):
+        """Запустить следующий отрезок, если автомат свободен."""
+        if self._busy or not self._queue:
+            return
+        steps, step_hz = self._queue.pop(0)
+        self._start(steps, step_hz)
+
+    def _start(self, steps, step_hz):
         if not MIN_STEP_HZ <= step_hz <= MAX_STEP_HZ:
             raise ValueError(f"частота вне {MIN_STEP_HZ}..{MAX_STEP_HZ}")
         if steps == 0:
@@ -105,6 +127,7 @@ class Axis:
     def stop(self):
         self._sm.active(0)
         self._sm.restart()
+        self._queue = []
         self._busy = False
 
 
@@ -139,26 +162,38 @@ def handle(line):
         if axis is None:
             return f"err нет оси {index}"
         try:
-            axis.move(steps, step_hz)
+            queued = axis.enqueue(steps, step_hz)
         except ValueError as exc:
             return f"err {exc}"
-        return "ok"
+        # Ответ несёт глубину очереди: по ней ноутбук понимает, что не
+        # успевает, и должен притормозить, а не копить отставание.
+        return f"ok q{queued}"
 
     return f"err неизвестная команда {cmd}"
 
 
 def main():
+    """Неблокирующий цикл.
+
+    Читать stdin блокирующе нельзя: пока ждём строку, некому запустить
+    следующий отрезок из очереди, и между кадрами появляются паузы.
+    """
     print(f"ok {VERSION}")
+    poller = select.poll()
+    poller.register(sys.stdin, select.POLLIN)
+
     while True:
-        line = sys.stdin.readline()
-        if not line:
-            continue
-        try:
-            reply = handle(line.strip())
-        except Exception as exc:            # прошивка не должна падать молча
-            reply = f"err {type(exc).__name__}: {exc}"
-        if reply:
-            print(reply)
+        if poller.poll(1):                  # 1 мс — не тормозим обслуживание
+            line = sys.stdin.readline()
+            if line:
+                try:
+                    reply = handle(line.strip())
+                except Exception as exc:    # прошивка не должна падать молча
+                    reply = f"err {type(exc).__name__}: {exc}"
+                if reply:
+                    print(reply)
+        for axis in AXIS_OBJECTS.values():
+            axis.service()
 
 
 if __name__ == "__main__":
