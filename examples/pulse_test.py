@@ -6,11 +6,11 @@
 
 Прогнать на железе (мотор без нагрузки!):
 
-    python examples/pulse_test.py --port /dev/tty.usbmodem1101 --degrees 90
+    python examples/pulse_test.py --port /dev/cu.usbmodem1101 --degrees 90
 
 Проверка «туда-обратно» — вал обязан вернуться на то же место:
 
-    python examples/pulse_test.py --port /dev/tty.usbmodem1101 --degrees 90 --there-and-back
+    python examples/pulse_test.py --port /dev/cu.usbmodem1101 --degrees 90 --there-and-back
 """
 
 import argparse

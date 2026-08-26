@@ -147,7 +147,7 @@ def describe(segments: list[Segment]) -> str:
 class StepperLink:
     """Клиент прошивки ``pico_step`` поверх USB-serial.
 
-    >>> link = StepperLink(port="/dev/tty.usbmodem1101")   # doctest: +SKIP
+    >>> link = StepperLink(port="/dev/cu.usbmodem1101")   # doctest: +SKIP
     >>> with link:                                         # doctest: +SKIP
     ...     link.move(axis=0, steps=50_000, profile=RampProfile())
     """

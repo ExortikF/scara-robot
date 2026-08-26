@@ -55,17 +55,25 @@ PULS±/SIGN± (руководство C30, гл. 4.2 и 4.3.1). Внутренн
 
 ## Начало работы
 
+Поднять связь по RS-485 — пошагово: [docs/rs485_setup.md](docs/rs485_setup.md).
+
+```bash
+.venv/bin/python examples/ports.py              # найти переходник
+.venv/bin/python examples/mb.py read P-004      # прочитать регистр
+.venv/bin/python examples/mb.py write P-076 100 --verify
+```
+
 Найти привод на шине (перебирает скорость, чётность и адрес; читает только
 `P-003`, ничего не пишет):
 
 ```bash
-.venv/bin/python examples/scan_bus.py /dev/tty.usbserial-XXXX --ids 1-32
+.venv/bin/python examples/scan_bus.py /dev/cu.usbserial-XXXX --ids 1-32
 ```
 
 Толчковый прогон на разгруженной оси:
 
 ```bash
-.venv/bin/python examples/jog.py /dev/tty.usbserial-XXXX --speed 100 --seconds 2
+.venv/bin/python examples/jog.py /dev/cu.usbserial-XXXX --speed 100 --seconds 2
 ```
 
 ## Пример
@@ -74,7 +82,7 @@ PULS±/SIGN± (руководство C30, гл. 4.2 и 4.3.1). Внутренн
 from scara_drive import DriveConfig, SerialConfig, ServoDrive
 from scara_drive import registers as reg
 
-cfg = DriveConfig(SerialConfig(port="/dev/tty.usbserial-XXXX", device_id=1))
+cfg = DriveConfig(SerialConfig(port="/dev/cu.usbserial-XXXX", device_id=1))
 
 with ServoDrive(cfg) as drive:
     print(drive.read_param(reg.P_CONTROL_MODE))

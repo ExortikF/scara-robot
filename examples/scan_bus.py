@@ -1,6 +1,6 @@
 """Поиск привода на шине: перебор скорости, чётности и адреса ведомого.
 
-    python examples/scan_bus.py /dev/tty.usbserial-A1
+    python examples/scan_bus.py /dev/cu.usbserial-A1
 
 Читает P-003 (версия ПО, только чтение — безопасно) у каждого кандидата.
 """

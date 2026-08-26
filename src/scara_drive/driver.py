@@ -120,7 +120,7 @@ class DriveConfig:
 class ServoDrive:
     """Синхронный клиент привода. Используется как контекстный менеджер.
 
-    >>> cfg = DriveConfig(serial=SerialConfig(port="/dev/tty.usbserial-A1"))
+    >>> cfg = DriveConfig(serial=SerialConfig(port="/dev/cu.usbserial-A1"))
     >>> tcp = DriveConfig(tcp=TcpConfig(host="192.168.1.50"))   # через шлюз
     >>> with ServoDrive(cfg) as drive:            # doctest: +SKIP
     ...     drive.write_param(reg.P_CONTROL_MODE, reg.ControlMode.SPEED)

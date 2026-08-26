@@ -82,7 +82,7 @@ Ethernet<->RS-485 (USR-TCP232, Waveshare и подобные). Native Ethernet �
 Драйвер поддерживает оба транспорта:
 
 ```python
-DriveConfig(serial=SerialConfig(port="/dev/tty.usbserial-XXXX"))
+DriveConfig(serial=SerialConfig(port="/dev/cu.usbserial-XXXX"))
 DriveConfig(tcp=TcpConfig(host="192.168.1.50"))            # через шлюз
 DriveConfig(tcp=TcpConfig(host="192.168.1.50", framer_rtu=True))  # прозрачный шлюз
 ```

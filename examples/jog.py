@@ -1,6 +1,6 @@
 """Толчковый прогон в скоростном режиме на разгруженной оси.
 
-    python examples/jog.py /dev/tty.usbserial-A1 --speed 100 --seconds 2
+    python examples/jog.py /dev/cu.usbserial-A1 --speed 100 --seconds 2
 
 Перед первым запуском снимите нагрузку с оси: значение команды «назад»
 взято из захвата обмена и не подтверждено руководством.
