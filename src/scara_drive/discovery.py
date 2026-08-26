@@ -2,7 +2,7 @@
 
 На macOS у одного физического адаптера всегда два устройства:
 
-* ``/dev/cu.XXX`` — вызываемое (dial-in). При открытии ждёт сигнал DCD,
+* ``/dev/tty.XXX`` — вызываемое (dial-in). При открытии ждёт сигнал DCD,
   которого у переходника нет, поэтому open() может просто зависнуть.
 * ``/dev/cu.XXX``  — вызывающее (call-out). **Открывать надо это.**
 
@@ -40,7 +40,7 @@ class Port:
     @property
     def is_callout(self) -> bool:
         """macOS: /dev/cu.* — то, что нужно открывать."""
-        return "/cu." in self.device or not self.device.startswith("/dev/cu.")
+        return not self.device.startswith("/dev/tty.")
 
     def __str__(self) -> str:
         chip = f" [{self.chip}]" if self.chip else ""
