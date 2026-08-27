@@ -96,15 +96,16 @@ class DriveConfig:
     cmd_forward: int = reg.CMD_FORWARD
     cmd_reverse: int = reg.CMD_REVERSE
 
-    #: Параметр задания скорости (номер nn в ``P-0nn``).
-    speed_param: int = reg.P_SPEED_CMD
+    #: Параметр задания скорости JOG (номер nn в ``P-0nn``), единицы — об/мин.
+    speed_param: int = reg.P_JOG_SPEED
 
-    #: Максимум задания скорости — жёсткий предел, писать больше драйвер не даст.
+    #: Максимум задания скорости, об/мин. Жёсткий предел: больше не запишем.
+    #: Номинал мотора лежит в P-207 (по умолчанию 2500) — сверьтесь с ним.
     speed_limit: int = 1000
 
-    #: Регистр текущего положения (32 бита, два подряд идущих регистра).
-    #: В снятом дампе его нет — без него :meth:`ServoDrive.move_to` недоступен.
-    position_register: int | None = None
+    #: Регистр текущего положения (32 бита, два подряд идущих регистра:
+    #: 0x101F младшее слово, 0x1020 старшее).
+    position_register: int | None = reg.REG_ABS_POS_LOW
     position_word_order: str = "low_first"  # 'low_first' | 'high_first'
 
     #: Импульсов энкодера на оборот вала — для пересчёта в обороты/градусы.
