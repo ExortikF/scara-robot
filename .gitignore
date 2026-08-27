@@ -1,3 +1,6 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Рабочие настройки GUI — машинозависимы, в репозитории им не место
+gui/c30_servo_settings.json
