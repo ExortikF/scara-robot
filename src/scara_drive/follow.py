@@ -72,6 +72,11 @@ class FollowConfig:
 
     period_s: float = 0.08            # период прохода контура
 
+    #: Сколько проходов подряд может сорваться, прежде чем контур сдастся.
+    #: Одиночный потерянный ответ на RS-485 — рядовое событие (помеха от
+    #: силовой части, занятый привод), и ронять из-за него весь сеанс нельзя.
+    max_consecutive_errors: int = 5
+
     #: Пауза после HOLD перед сменой направления. Взято из рабочей программы
     #: C30 Servo GUI: реверс подаётся не встык к противоположной команде, а
     #: через удержание, чтобы привод успел погасить скорость.
@@ -111,7 +116,9 @@ class Telemetry:
     raw_counts: int = 0
     passes: int = 0
     period_ms: float = 0.0
-    error_text: str | None = None
+    error_text: str | None = None        # фатальная: контур остановлен
+    warning_text: str | None = None      # преходящая: проход сорвался
+    dropped_passes: int = 0              # всего сорванных проходов за сеанс
 
 
 class AngleFollower:
@@ -231,25 +238,56 @@ class AngleFollower:
     def _worker(self) -> None:
         last_direction = None
         last_start = time.monotonic()
+        consecutive_errors = 0
+        dropped = 0
+
         try:
             self.drive.enable()
-            while not self._stop.is_set():
-                start = time.monotonic()
-                last_direction = self._one_pass(last_direction)
-                self.telemetry.period_ms = (start - last_start) * 1000
-                last_start = start
-
-                remaining = self.config.period_s - (time.monotonic() - start)
-                if remaining > 0:
-                    self._stop.wait(remaining)
         except Exception as exc:
-            log.exception("контур слежения остановлен")
-            self.telemetry.error_text = str(exc)
-        finally:
+            log.exception("привод не разрешился")
+            self.telemetry.error_text = f"не удалось разрешить привод: {exc}"
+            return
+
+        while not self._stop.is_set():
+            start = time.monotonic()
             try:
-                self.drive.hold()
-            except Exception:
-                log.exception("не удалось остановить привод")
+                last_direction = self._one_pass(last_direction)
+                if consecutive_errors:
+                    log.info("связь восстановилась после %d сбоев",
+                             consecutive_errors)
+                consecutive_errors = 0
+                self.telemetry.warning_text = None
+            except Exception as exc:
+                # Сорванный проход — не повод останавливать сеанс. Направление
+                # сбрасываем: неизвестно, дошла команда или нет, поэтому на
+                # следующем проходе реверс пойдёт через HOLD.
+                consecutive_errors += 1
+                dropped += 1
+                last_direction = None
+                log.warning("проход сорвался (%d подряд): %s",
+                            consecutive_errors, exc)
+                self.telemetry.warning_text = (
+                    f"сбой связи ({consecutive_errors} подряд): {exc}")
+                self.telemetry.dropped_passes = dropped
+
+                if consecutive_errors >= self.config.max_consecutive_errors:
+                    self.telemetry.error_text = (
+                        f"связь потеряна: {consecutive_errors} проходов подряд "
+                        f"без ответа. {exc}")
+                    break
+
+            self.telemetry.dropped_passes = dropped
+            self.telemetry.period_ms = (start - last_start) * 1000
+            last_start = start
+
+            remaining = self.config.period_s - (time.monotonic() - start)
+            if remaining > 0:
+                self._stop.wait(remaining)
+
+        try:
+            self.drive.hold()
+        except Exception:
+            log.exception("не удалось остановить привод")
 
     def start(self) -> None:
         if self._thread is not None:

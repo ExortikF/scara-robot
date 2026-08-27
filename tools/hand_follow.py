@@ -176,6 +176,8 @@ class CameraSource:
             )
         self._start = time.monotonic()
         self.seen_hand = False
+        self.last_frame = None      # RGB-кадр для показа в окне
+        self.last_hand_x = None     # доля ширины 0..1, где найдено запястье
 
     def poll(self) -> float | None:
         """Вернуть угол 0..360 или None, если руки в кадре нет."""
@@ -189,12 +191,34 @@ class CameraSource:
         timestamp_ms = int((time.monotonic() - self._start) * 1000)
 
         result = self._landmarker.detect_for_video(image, timestamp_ms)
+
         if not result.hand_landmarks:
+            self.last_hand_x = None
+            self.last_frame = rgb
             return None
 
         self.seen_hand = True
-        wrist = result.hand_landmarks[0][0]   # точка 0 — запястье
-        return min(max(wrist.x, 0.0), 1.0) * 360.0
+        landmarks = result.hand_landmarks[0]
+        wrist = landmarks[0]                  # точка 0 — запястье
+        x = min(max(wrist.x, 0.0), 1.0)
+        self.last_hand_x = x
+        self.last_frame = self._annotate(rgb, landmarks, x)
+        return x * 360.0
+
+    def _annotate(self, rgb, landmarks, x: float):
+        """Отметить на кадре найденную кисть — чтобы видеть, что поймал детектор."""
+        cv2 = self._cv2
+        frame = rgb.copy()
+        height, width = frame.shape[:2]
+
+        for point in landmarks:
+            cx = int(min(max(point.x, 0.0), 1.0) * width)
+            cy = int(min(max(point.y, 0.0), 1.0) * height)
+            cv2.circle(frame, (cx, cy), 3, (0, 220, 130), -1)
+
+        line_x = int(x * width)
+        cv2.line(frame, (line_x, 0), (line_x, height), (74, 158, 255), 2)
+        return frame
 
     def close(self) -> None:
         self._capture.release()
@@ -254,12 +278,27 @@ def run_gui(follower: AngleFollower, source, args) -> int:
     import tkinter as tk
     from tkinter import ttk
 
+    show_camera = isinstance(source, CameraSource)
+    photo_holder = {}          # держим ссылку на PhotoImage, иначе Tk её съест
+
+    if show_camera:
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            log.warning("нет Pillow — окно будет без картинки с камеры")
+            show_camera = False
+
     root = tk.Tk()
     root.title(f"Слежение за рукой — {source.name}")
-    root.minsize(760, 320)
+    root.minsize(820, 660 if show_camera else 320)
 
     header = ttk.Label(root, text=source.hint, font=("SF Pro Text", 13, "bold"))
     header.pack(pady=(14, 6))
+
+    if show_camera:
+        video = tk.Label(root, background="#111", text="ожидание кадра...",
+                         foreground="#777", font=("SF Pro Text", 12))
+        video.pack(padx=16, pady=(0, 8))
 
     canvas = tk.Canvas(root, height=130, background="#1b1b1b", highlightthickness=0)
     canvas.pack(fill="both", expand=True, padx=16, pady=8)
@@ -271,6 +310,16 @@ def run_gui(follower: AngleFollower, source, args) -> int:
 
     if isinstance(source, MouseSource):
         source.bind(canvas, follower.set_target)
+
+    def draw_video() -> None:
+        frame = getattr(source, "last_frame", None)
+        if frame is not None:
+            image = Image.fromarray(frame)
+            image.thumbnail((640, 400))
+            photo = ImageTk.PhotoImage(image)
+            photo_holder["frame"] = photo        # ссылка обязательна
+            video.configure(image=photo, text="")
+        root.after(40, draw_video)
 
     def draw() -> None:
         t = follower.telemetry
@@ -295,12 +344,20 @@ def run_gui(follower: AngleFollower, source, args) -> int:
             text=f"рука {t.target_deg:6.1f}°     вал {t.actual_deg:6.1f}°     "
                  f"ошибка {t.error_deg:+6.1f}°     {t.command_rpm:+3d} об/мин"
         )
+
         if t.error_text:
-            status.config(text=f"ОШИБКА: {t.error_text}", foreground="#e05252")
+            status.config(text=f"ОСТАНОВЛЕНО: {t.error_text}", foreground="#e05252")
+        elif t.warning_text:
+            status.config(text=t.warning_text, foreground="#ffb648")
         else:
+            hand = ""
+            if show_camera and getattr(source, "last_hand_x", None) is None:
+                hand = "   руки в кадре нет"
+            dropped = f"   сбоев {t.dropped_passes}" if t.dropped_passes else ""
             status.config(
                 text=f"{'удержание' if t.holding else 'едет'}   "
-                     f"проход {t.period_ms:.0f} мс   всего {t.passes}",
+                     f"проход {t.period_ms:.0f} мс   всего {t.passes}"
+                     f"{dropped}{hand}",
                 foreground="",
             )
         root.after(50, draw)
@@ -321,6 +378,8 @@ def run_gui(follower: AngleFollower, source, args) -> int:
     draw()
     if isinstance(source, CameraSource):
         poll_camera()
+        if show_camera:
+            draw_video()
 
     try:
         root.mainloop()
