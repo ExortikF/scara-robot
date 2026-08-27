@@ -32,7 +32,7 @@ def main() -> int:
     for port in ports:
         print(port)
     print(f"\nнайдено: {len(ports)}")
-    print("на macOS открывать нужно /dev/cu.* (не /dev/cu.*)")
+    print("на macOS открывать нужно /dev/cu.* (не /dev/tty.*)")
     return 0
 
 
