@@ -1,0 +1,32 @@
+[
+  {
+    "name": "J1 база",
+    "device_id": 1,
+    "hand": "Right",
+    "source": "x",
+    "in_min": 0.2,
+    "in_max": 0.8,
+    "span_deg": 90.0,
+    "invert": false
+  },
+  {
+    "name": "J2 плечо",
+    "device_id": 2,
+    "hand": "Right",
+    "source": "y",
+    "in_min": 0.2,
+    "in_max": 0.8,
+    "span_deg": 60.0,
+    "invert": true
+  },
+  {
+    "name": "J3 локоть",
+    "device_id": 3,
+    "hand": "Left",
+    "source": "y",
+    "in_min": 0.2,
+    "in_max": 0.8,
+    "span_deg": 40.0,
+    "invert": true
+  }
+]

@@ -264,6 +264,33 @@ class HandSource:
         self._landmarker.close()
 
 
+def preflight_line(transport: SerialConfig) -> None:
+    """Убедиться, что линия молчит, пока молчим мы.
+
+    Без этой проверки шумящая шина приводит не к внятной ошибке, а к
+    зависанию: поток мусора не даёт чтению завершиться по таймауту.
+    """
+    from scara_drive.discovery import measure_line_noise
+
+    noise = measure_line_noise(transport.port, transport.baudrate,
+                               transport.parity, seconds=0.5)
+    if noise == 0:
+        log.info("линия чистая")
+        return
+
+    raise SystemExit(
+        f"\nЛИНИЯ ШУМИТ: с молчащей шины пришло {noise} байт за 0.5 с.\n\n"
+        "Работать так нельзя — обмен будет зависать: пока байты идут\n"
+        "непрерывно, чтение ответа не завершается по таймауту.\n\n"
+        "Две обычные причины:\n"
+        "  1. на шине второй ведущий — закройте другие программы,\n"
+        "     работающие с этим портом (в том числе C30 Servo GUI);\n"
+        "  2. линия без смещения и терминаторов — см. подробности:\n"
+        "     python tools/bus_health.py\n\n"
+        "Запустить вопреки проверке: --skip-line-check\n"
+    )
+
+
 def build_followers(args, specs: list[AxisSpec]):
     """Собрать контуры по осям. Возвращает (followers, bus | None)."""
     config = FollowConfig(
@@ -293,6 +320,9 @@ def build_followers(args, specs: list[AxisSpec]):
         if port is None:
             raise SystemExit("не нашёл переходник — укажите --port")
         transport = SerialConfig(port=port, baudrate=args.baud, parity=args.parity)
+
+    if isinstance(transport, SerialConfig) and not args.skip_line_check:
+        preflight_line(transport)
 
     bus = DriveBus(transport)
     bus.connect()
@@ -464,6 +494,8 @@ def main() -> int:
     p.add_argument("--sweep", type=float, default=0.12,
                    help="период обхода всех осей, с")
     p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--skip-line-check", action="store_true",
+                   help="не проверять шину на шум перед запуском")
     p.add_argument("--swap-hands", action="store_true",
                    help="поменять руки местами, если метки вышли наоборот")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -487,8 +519,21 @@ def main() -> int:
 
     followers, bus = build_followers(args, specs)
     loop = MultiAxisFollower(followers, period_s=args.sweep)
-    loop.set_zero_here()
-    log.info("текущее положение каждой оси принято за ноль")
+
+    for spec in specs:
+        log.info("опрашиваю ось %s (id=%d)...", spec.name, spec.device_id)
+        try:
+            followers[spec.name].set_zero_here()
+        except Exception as exc:
+            if bus is not None:
+                bus.close()
+            raise SystemExit(
+                f"ось {spec.name} (id={spec.device_id}) не отвечает: {exc}\n"
+                f"проверьте питание привода и его адрес:\n"
+                f"    python examples/scan_bus.py {getattr(args, 'port', None) or ''} "
+                f"--baud {args.baud} --parity {args.parity} --ids 1-8"
+            ) from exc
+    log.info("положение всех осей принято за ноль")
 
     source = HandSource(camera_index=args.camera, swap_hands=args.swap_hands)
     try:

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 # Производители чипов, которые почти всегда и есть USB<->RS-485.
@@ -72,3 +73,27 @@ def guess_port() -> str | None:
     """Единственный подходящий адаптер, если он ровно один."""
     candidates = list_ports()
     return candidates[0].device if len(candidates) == 1 else None
+
+
+def measure_line_noise(port: str, baudrate: int, parity: str,
+                       seconds: float = 0.5) -> int:
+    """Сколько байт прилетает с молчащей линии за ``seconds``.
+
+    На исправной шине RS-485 в покое — ноль. Любое ненулевое значение означает,
+    что приёмник раскладывает на кадры шум или чужой обмен.
+
+    Проверять это до начала работы важно вот почему: пока байты идут
+    непрерывно, чтение ответа не может завершиться по таймауту — оно
+    бесконечно читает мусор, и программа выглядит повисшей, хотя приводы
+    отвечают корректно.
+    """
+    import serial
+
+    with serial.Serial(port, baudrate=baudrate, parity=parity, bytesize=8,
+                       stopbits=1, timeout=0.05) as ser:
+        ser.reset_input_buffer()
+        seen = 0
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            seen += len(ser.read(4096))
+        return seen
