@@ -1,2 +1,11 @@
 pymodbus>=3.15,<4
 pyserial>=3.5
+
+# Слежение за рукой (tools/hand_follow.py --source camera).
+#
+# Версия закреплена намеренно: mediapipe 1.0.x на macOS падает при
+# инициализации Metal внутри TensorsToDetectionsCalculator
+# ("graph_service.h: Check failed: service_ Service is unavailable")
+# и роняет процесс целиком, а не выбрасывает исключение. Обходится только
+# откатом на 0.10.x — там тот же Tasks API работает.
+mediapipe==0.10.35

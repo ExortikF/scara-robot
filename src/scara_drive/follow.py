@@ -72,6 +72,11 @@ class FollowConfig:
 
     period_s: float = 0.08            # период прохода контура
 
+    #: Пауза после HOLD перед сменой направления. Взято из рабочей программы
+    #: C30 Servo GUI: реверс подаётся не встык к противоположной команде, а
+    #: через удержание, чтобы привод успел погасить скорость.
+    reversal_pause_s: float = 0.04
+
     def __post_init__(self) -> None:
         if not 0 < self.smoothing <= 1:
             raise ValueError("smoothing в диапазоне (0, 1]")
@@ -208,6 +213,10 @@ class AngleFollower:
         rpm = min(cfg.max_rpm, max(cfg.min_rpm, abs(demand)))
         rpm_int = max(cfg.min_rpm, int(round(rpm)))
         direction = "forward" if demand > 0 else "reverse"
+
+        if last_direction is not None and direction != last_direction:
+            self.drive.hold()
+            time.sleep(cfg.reversal_pause_s)
 
         self.drive.run(rpm_int, reverse=(direction == "reverse"))
 

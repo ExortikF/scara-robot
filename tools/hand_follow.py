@@ -105,15 +105,27 @@ class MouseSource:
 
 
 class CameraSource:
-    """Цель из положения ладони в кадре веб-камеры (mediapipe)."""
+    """Цель из положения ладони в кадре веб-камеры.
+
+    mediapipe 1.x: старого ``mp.solutions.hands`` больше нет, работает только
+    Tasks API, и ему нужен файл модели ``hand_landmarker.task``.
+    """
 
     name = "камера"
     hint = "двигай ладонью влево-вправо перед камерой"
 
-    def __init__(self, camera_index: int = 0):
+    MODEL_NAME = "hand_landmarker.task"
+    MODEL_URL = (
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
+        "hand_landmarker/float16/1/hand_landmarker.task"
+    )
+
+    def __init__(self, camera_index: int = 0, model_path: Path | None = None):
         try:
             import cv2
             import mediapipe as mp
+            from mediapipe.tasks import python as mp_tasks
+            from mediapipe.tasks.python import vision
         except ImportError as exc:
             raise SystemExit(
                 "для --source camera нужны mediapipe и opencv:\n"
@@ -123,30 +135,70 @@ class CameraSource:
 
         self._cv2 = cv2
         self._mp = mp
-        self._capture = cv2.VideoCapture(camera_index)
-        if not self._capture.isOpened():
-            raise SystemExit(f"камера {camera_index} не открылась")
-        self._hands = mp.solutions.hands.Hands(
-            max_num_hands=1, min_detection_confidence=0.6,
+
+        model = model_path or (Path(__file__).resolve().parents[1]
+                               / "models" / self.MODEL_NAME)
+        if not model.is_file():
+            raise SystemExit(
+                f"нет файла модели: {model}\n\n"
+                "mediapipe 1.x не поставляет модели вместе с пакетом.\n"
+                "Скачайте её один раз (около 7.5 МБ):\n\n"
+                f"    mkdir -p {model.parent}\n"
+                f"    curl -L -o {model} \\\n        {self.MODEL_URL}\n"
+            )
+
+        options = vision.HandLandmarkerOptions(
+            # Делегат строго CPU: на macOS сборка mediapipe 1.0.1 падает при
+            # инициализации Metal ("graph_service: Service is unavailable"),
+            # роняя весь процесс, а не выбрасывая исключение.
+            base_options=mp_tasks.BaseOptions(
+                model_asset_path=str(model),
+                delegate=mp_tasks.BaseOptions.Delegate.CPU,
+            ),
+            running_mode=vision.RunningMode.VIDEO,
+            num_hands=1,
+            min_hand_detection_confidence=0.6,
             min_tracking_confidence=0.6,
         )
+        self._landmarker = vision.HandLandmarker.create_from_options(options)
+
+        self._capture = cv2.VideoCapture(camera_index)
+        if not self._capture.isOpened():
+            raise SystemExit(
+                f"камера {camera_index} не открылась.\n\n"
+                "На macOS доступ к камере даётся тому приложению, из которого\n"
+                "запущен python (Терминал, iTerm, Claude Code). Порядок:\n"
+                "  1. разрешить в диалоге, либо Системные настройки ->\n"
+                "     Конфиденциальность и безопасность -> Камера;\n"
+                "  2. перезапустить это приложение целиком — выданное\n"
+                "     разрешение подхватывается только новым процессом;\n"
+                "  3. запустить скрипт снова."
+            )
+        self._start = time.monotonic()
+        self.seen_hand = False
 
     def poll(self) -> float | None:
         """Вернуть угол 0..360 или None, если руки в кадре нет."""
         ok, frame = self._capture.read()
         if not ok:
             return None
-        frame = self._cv2.flip(frame, 1)          # зеркало: вправо = вправо
-        result = self._hands.process(
-            self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB))
-        if not result.multi_hand_landmarks:
+
+        frame = self._cv2.flip(frame, 1)      # зеркало: ведёшь вправо — вправо
+        rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
+        image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+        timestamp_ms = int((time.monotonic() - self._start) * 1000)
+
+        result = self._landmarker.detect_for_video(image, timestamp_ms)
+        if not result.hand_landmarks:
             return None
-        wrist = result.multi_hand_landmarks[0].landmark[0]
+
+        self.seen_hand = True
+        wrist = result.hand_landmarks[0][0]   # точка 0 — запястье
         return min(max(wrist.x, 0.0), 1.0) * 360.0
 
     def close(self) -> None:
         self._capture.release()
-        self._hands.close()
+        self._landmarker.close()
 
 
 def build_drive(args):
