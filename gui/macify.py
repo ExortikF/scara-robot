@@ -96,6 +96,44 @@ MINSIZE_NEW = '''        # 930 px не влезают в рабочую обла
         self.root.minsize(1000, min(930, max(600, screen_height - 160)))'''
 
 
+# --- Правки контура управления -------------------------------------------
+#
+# Это не адаптация под платформу, а исправление того, из-за чего ось не встаёт
+# в допуск. Обоснование и расчёты — в docs/pid_loop_diagnosis.md.
+
+GAP_OLD = "        self.inter_frame_delay = 0.03"
+GAP_NEW = """        # Modbus RTU требует паузы 3.5 символа между кадрами: на 19200 8E1
+        # это 2 мс. Стояло 30 мс — в 15 раз больше нужного, и именно эта
+        # пауза съедала бюджет времени контура.
+        self.inter_frame_delay = 0.005"""
+
+PID_SLEEP_OLD = """                self.ui_queue.put(("success", self._pid_ui_update, payload))
+                time.sleep(0.06)"""
+PID_SLEEP_NEW = """                self.ui_queue.put(("success", self._pid_ui_update, payload))
+                # 60 мс здесь — треть периода контура на ровном месте.
+                time.sleep(0.02)"""
+
+WINDUP_OLD = """                if s["ki"] > 0:
+                    integral += error * dt
+                    integral = max(
+                        -integral_limit,
+                        min(integral_limit, integral)
+                    )
+                else:
+                    integral = 0.0"""
+WINDUP_NEW = """                if s["ki"] > 0 and abs(error) > s["tolerance"]:
+                    integral += error * dt
+                    integral = max(
+                        -integral_limit,
+                        min(integral_limit, integral)
+                    )
+                else:
+                    # Внутри допуска интеграл копить нельзя: на остаточной
+                    # ошибке он медленно растёт и через пару минут сам
+                    # выталкивает ось из удержания.
+                    integral = 0.0"""
+
+
 def macify(source: str) -> tuple[str, list[str]]:
     """Наложить правки. Возвращает (текст, список применённых правок)."""
     applied = []
@@ -121,6 +159,10 @@ from serial.tools import list_ports
     if not count:
         raise SystemExit("не нашёл ни одного шрифта Segoe UI — проверьте версию")
     applied.append(f"шрифты ({count} шт.)")
+
+    text = replace(text, GAP_OLD, GAP_NEW, "пауза между кадрами 30 -> 5 мс")
+    text = replace(text, PID_SLEEP_OLD, PID_SLEEP_NEW, "sleep контура 60 -> 20 мс")
+    text = replace(text, WINDUP_OLD, WINDUP_NEW, "интегратор не копит в допуске")
     return text, applied
 
 

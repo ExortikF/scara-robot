@@ -107,7 +107,10 @@ class ModbusRTUClient:
         self.ser = None
         self.slave_id = 1
         self._lock = threading.Lock()
-        self.inter_frame_delay = 0.03
+        # Modbus RTU требует паузы 3.5 символа между кадрами: на 19200 8E1
+        # это 2 мс. Стояло 30 мс — в 15 раз больше нужного, и именно эта
+        # пауза съедала бюджет времени контура.
+        self.inter_frame_delay = 0.005
         self.retries = 2
         self._last_transaction_end = 0.0
 
@@ -1220,13 +1223,16 @@ class C30ServoApp:
                 dt = max(now - last_t, 0.001)
                 last_t = now
 
-                if s["ki"] > 0:
+                if s["ki"] > 0 and abs(error) > s["tolerance"]:
                     integral += error * dt
                     integral = max(
                         -integral_limit,
                         min(integral_limit, integral)
                     )
                 else:
+                    # Внутри допуска интеграл копить нельзя: на остаточной
+                    # ошибке он медленно растёт и через пару минут сам
+                    # выталкивает ось из удержания.
                     integral = 0.0
 
                 measured_deg_s = actual_rpm * 6.0
@@ -1290,7 +1296,8 @@ class C30ServoApp:
                     "status": status,
                 }
                 self.ui_queue.put(("success", self._pid_ui_update, payload))
-                time.sleep(0.06)
+                # 60 мс здесь — треть периода контура на ровном месте.
+                time.sleep(0.02)
 
         except Exception as exc:
             self.ui_queue.put(("failure", self._pid_failed, exc))
