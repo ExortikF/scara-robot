@@ -157,6 +157,10 @@ class ServoDrive:
             )
             self._where = f"{transport.host}:{transport.port}"
 
+        # Кэш последних отправленных значений — чтобы не слать их повторно.
+        self._last_command: int | None = None
+        self._last_speed: int | None = None
+
     # --- жизненный цикл ---------------------------------------------------
 
     def connect(self) -> None:
@@ -253,18 +257,41 @@ class ServoDrive:
             raise ValueError(f"скорость {speed} вне 0..{limit}")
         self.write_param(self.config.speed_param, speed)
 
+    def enable(self) -> None:
+        """Разрешить привод и встать на удержание нулевой скорости."""
+        self.write_param(reg.P_SERVO_ENABLE, 1)
+        self.hold()
+
+    def hold(self) -> None:
+        """Удержание на нулевой скорости, привод остаётся под током."""
+        if self._last_command == reg.CMD_HOLD:
+            return
+        self._write(self.config.cmd_register, reg.CMD_HOLD)
+        self._last_command = reg.CMD_HOLD
+
     def run(self, speed: int | None = None, *, reverse: bool = False) -> None:
-        """Пуск. ``speed`` задаётся до подачи команды направления."""
-        if speed is not None:
+        """Пуск. ``speed`` задаётся до подачи команды направления.
+
+        Повторные записи с тем же значением не отправляются: в контуре
+        слежения это экономит по транзакции на каждом проходе, а транзакция
+        по RS-485 стоит десятки миллисекунд.
+        """
+        if speed is not None and speed != self._last_speed:
             self.set_speed(speed)
+            self._last_speed = speed
         cmd = self.config.cmd_reverse if reverse else self.config.cmd_forward
-        log.info("пуск %s, команда 0x%04X", "назад" if reverse else "вперёд", cmd)
-        self._write(self.config.cmd_register, cmd)
+        if cmd != self._last_command:
+            log.debug("пуск %s, команда 0x%04X",
+                      "назад" if reverse else "вперёд", cmd)
+            self._write(self.config.cmd_register, cmd)
+            self._last_command = cmd
 
     def stop(self) -> None:
         """Останов."""
         log.info("останов")
         self._write(self.config.cmd_register, self.config.cmd_stop)
+        self._last_command = self.config.cmd_stop
+        self._last_speed = None
 
     # --- обратная связь по положению --------------------------------------
 

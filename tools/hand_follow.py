@@ -1,0 +1,343 @@
+"""Слежение вала за рукой в реальном времени: слева 0°, справа 360°.
+
+Источники цели:
+
+  mouse   положение курсора по горизонтали в окне (ничего ставить не надо)
+  camera  ладонь в кадре веб-камеры, нужен mediapipe
+
+Запуск:
+
+    python tools/hand_follow.py --simulate          проверка без привода
+    python tools/hand_follow.py --confirm           на живом приводе
+    python tools/hand_follow.py --confirm --source camera
+
+Проверка логики контура без окна и без железа:
+
+    python tools/hand_follow.py --headless --simulate
+
+ВАЖНО: с --confirm скрипт КРУТИТ ВАЛ вслед за рукой. Ось должна быть
+разгружена, аварийный останов под рукой. Закрытие окна останавливает привод.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from scara_drive import DriveConfig, SerialConfig, ServoDrive, TcpConfig
+from scara_drive.discovery import guess_port
+from scara_drive.follow import (AngleFollower, FollowConfig, normalize_360,
+                                shortest_angle_error)
+
+log = logging.getLogger("hand_follow")
+
+
+class SimulatedDrive:
+    """Привод на бумаге: интегрирует заданную скорость.
+
+    Нужен, чтобы проверить контур, вёрстку и поведение на краях диапазона,
+    не трогая железо. Задержку обмена изображает намеренно.
+    """
+
+    def __init__(self, counts_per_rev: int = 131072, invert: bool = True,
+                 latency_s: float = 0.02):
+        self.counts_per_rev = counts_per_rev
+        self.invert = invert
+        self.latency_s = latency_s
+        self.position = 0
+        self.rpm = 0.0
+        self._last = time.monotonic()
+
+    def _advance(self) -> None:
+        now = time.monotonic()
+        dt = now - self._last
+        self._last = now
+        counts = self.rpm / 60.0 * self.counts_per_rev * dt
+        if self.invert:
+            counts = -counts
+        self.position += int(counts)
+
+    def read_position(self) -> int:
+        time.sleep(self.latency_s)
+        self._advance()
+        return self.position
+
+    def enable(self) -> None:
+        pass
+
+    def hold(self) -> None:
+        self._advance()
+        self.rpm = 0.0
+
+    def run(self, speed: int, *, reverse: bool = False) -> None:
+        time.sleep(self.latency_s)
+        self._advance()
+        self.rpm = -speed if reverse else speed
+
+    def stop(self) -> None:
+        self.hold()
+
+    def close(self) -> None:
+        pass
+
+
+class MouseSource:
+    """Цель из положения курсора по горизонтали внутри окна."""
+
+    name = "мышь"
+    hint = "веди курсор по окну: слева 0°, справа 360°"
+
+    def bind(self, widget, on_angle) -> None:
+        def handler(event):
+            width = max(widget.winfo_width(), 1)
+            fraction = min(max(event.x / width, 0.0), 1.0)
+            on_angle(fraction * 360.0)
+
+        widget.bind("<Motion>", handler)
+
+    def close(self) -> None:
+        pass
+
+
+class CameraSource:
+    """Цель из положения ладони в кадре веб-камеры (mediapipe)."""
+
+    name = "камера"
+    hint = "двигай ладонью влево-вправо перед камерой"
+
+    def __init__(self, camera_index: int = 0):
+        try:
+            import cv2
+            import mediapipe as mp
+        except ImportError as exc:
+            raise SystemExit(
+                "для --source camera нужны mediapipe и opencv:\n"
+                "    ./.venv/bin/pip install mediapipe\n"
+                f"(не найдено: {exc.name})"
+            ) from exc
+
+        self._cv2 = cv2
+        self._mp = mp
+        self._capture = cv2.VideoCapture(camera_index)
+        if not self._capture.isOpened():
+            raise SystemExit(f"камера {camera_index} не открылась")
+        self._hands = mp.solutions.hands.Hands(
+            max_num_hands=1, min_detection_confidence=0.6,
+            min_tracking_confidence=0.6,
+        )
+
+    def poll(self) -> float | None:
+        """Вернуть угол 0..360 или None, если руки в кадре нет."""
+        ok, frame = self._capture.read()
+        if not ok:
+            return None
+        frame = self._cv2.flip(frame, 1)          # зеркало: вправо = вправо
+        result = self._hands.process(
+            self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB))
+        if not result.multi_hand_landmarks:
+            return None
+        wrist = result.multi_hand_landmarks[0].landmark[0]
+        return min(max(wrist.x, 0.0), 1.0) * 360.0
+
+    def close(self) -> None:
+        self._capture.release()
+        self._hands.close()
+
+
+def build_drive(args):
+    if args.simulate:
+        return SimulatedDrive(counts_per_rev=args.cpr, invert=not args.no_invert)
+    if args.host:
+        config = DriveConfig(tcp=TcpConfig(host=args.host, device_id=args.id))
+    else:
+        port = args.port or guess_port()
+        if port is None:
+            raise SystemExit("не нашёл переходник — укажите --port")
+        config = DriveConfig(serial=SerialConfig(
+            port=port, baudrate=args.baud, parity=args.parity, device_id=args.id))
+    drive = ServoDrive(config)
+    drive.connect()
+    return drive
+
+
+def run_headless(follower: AngleFollower, seconds: float) -> int:
+    """Прогнать контур по заданной траектории цели и напечатать, как шло."""
+    print("проверка контура без окна: цель ходит слева направо и обратно\n")
+    print(f"{'с':>5} {'цель':>7} {'факт':>7} {'ошибка':>8} {'об/мин':>7}  режим")
+    print("-" * 48)
+
+    start = time.monotonic()
+    worst = 0.0
+    with follower:
+        while True:
+            elapsed = time.monotonic() - start
+            if elapsed > seconds:
+                break
+            # Треугольная развёртка 0 -> 360 -> 0 за 12 секунд.
+            phase = (elapsed % 12.0) / 12.0
+            target = phase * 720.0 if phase < 0.5 else (1.0 - phase) * 720.0
+            follower.set_target(target)
+
+            t = follower.telemetry
+            worst = max(worst, abs(t.error_deg))
+            print(f"{elapsed:5.1f} {t.target_deg:7.1f} {t.actual_deg:7.1f} "
+                  f"{t.error_deg:8.2f} {t.command_rpm:7d}  "
+                  f"{'удержание' if t.holding else 'едет'}")
+            time.sleep(0.5)
+
+    print(f"\nпроходов контура: {follower.telemetry.passes}")
+    print(f"наибольшее отставание от цели: {worst:.1f}°")
+    if follower.telemetry.error_text:
+        print(f"контур упал: {follower.telemetry.error_text}")
+        return 1
+    return 0
+
+
+def run_gui(follower: AngleFollower, source, args) -> int:
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = tk.Tk()
+    root.title(f"Слежение за рукой — {source.name}")
+    root.minsize(760, 320)
+
+    header = ttk.Label(root, text=source.hint, font=("SF Pro Text", 13, "bold"))
+    header.pack(pady=(14, 6))
+
+    canvas = tk.Canvas(root, height=130, background="#1b1b1b", highlightthickness=0)
+    canvas.pack(fill="both", expand=True, padx=16, pady=8)
+
+    readout = ttk.Label(root, text="—", font=("SF Pro Text", 12))
+    readout.pack(pady=(0, 4))
+    status = ttk.Label(root, text="", font=("SF Pro Text", 11))
+    status.pack(pady=(0, 12))
+
+    if isinstance(source, MouseSource):
+        source.bind(canvas, follower.set_target)
+
+    def draw() -> None:
+        t = follower.telemetry
+        width = max(canvas.winfo_width(), 1)
+        canvas.delete("all")
+
+        for fraction, label in ((0.0, "0°"), (0.5, "180°"), (1.0, "360°")):
+            x = fraction * (width - 2) + 1
+            canvas.create_line(x, 96, x, 112, fill="#555")
+            canvas.create_text(x, 122, text=label, fill="#888",
+                               anchor="n" if fraction else "nw")
+
+        target_x = t.target_deg / 360.0 * width
+        actual_x = t.actual_deg / 360.0 * width
+        canvas.create_line(target_x, 10, target_x, 92, fill="#4a9eff", width=3)
+        canvas.create_text(target_x, 4, text="рука", fill="#4a9eff", anchor="n")
+        canvas.create_line(actual_x, 30, actual_x, 92,
+                           fill="#3ddc84" if t.holding else "#ffb648", width=5)
+        canvas.create_text(actual_x, 46, text="вал", fill="#fff", anchor="n")
+
+        readout.config(
+            text=f"рука {t.target_deg:6.1f}°     вал {t.actual_deg:6.1f}°     "
+                 f"ошибка {t.error_deg:+6.1f}°     {t.command_rpm:+3d} об/мин"
+        )
+        if t.error_text:
+            status.config(text=f"ОШИБКА: {t.error_text}", foreground="#e05252")
+        else:
+            status.config(
+                text=f"{'удержание' if t.holding else 'едет'}   "
+                     f"проход {t.period_ms:.0f} мс   всего {t.passes}",
+                foreground="",
+            )
+        root.after(50, draw)
+
+    def poll_camera() -> None:
+        angle = source.poll()
+        if angle is not None:
+            follower.set_target(angle)
+        root.after(30, poll_camera)
+
+    def shutdown() -> None:
+        follower.stop()
+        source.close()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", shutdown)
+    follower.start()
+    draw()
+    if isinstance(source, CameraSource):
+        poll_camera()
+
+    try:
+        root.mainloop()
+    finally:
+        follower.stop()
+        source.close()
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--source", choices=["mouse", "camera"], default="mouse")
+    p.add_argument("--simulate", action="store_true", help="привод на бумаге")
+    p.add_argument("--headless", action="store_true", help="без окна, самопроверка")
+    p.add_argument("--confirm", action="store_true",
+                   help="подтвердить, что ось разгружена (нужно без --simulate)")
+    p.add_argument("--seconds", type=float, default=15.0, help="для --headless")
+
+    p.add_argument("--port")
+    p.add_argument("--baud", type=int, default=19200)
+    p.add_argument("--parity", default="E", choices=["N", "E", "O"])
+    p.add_argument("--id", type=int, default=1)
+    p.add_argument("--host")
+
+    p.add_argument("--cpr", type=int, default=131072)
+    p.add_argument("--no-invert", action="store_true",
+                   help="энкодер считает в ту же сторону, что и команда")
+    p.add_argument("--max-rpm", type=int, default=20)
+    p.add_argument("--kp", type=float, default=0.225)
+    p.add_argument("--tolerance", type=float, default=2.0)
+    p.add_argument("--period", type=float, default=0.08)
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args()
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(levelname)s %(message)s")
+
+    if not args.simulate and not args.confirm:
+        print(__doc__)
+        print("Запустите с --confirm, когда ось будет разгружена, "
+              "или с --simulate для проверки без железа.")
+        return 1
+
+    config = FollowConfig(
+        counts_per_rev=args.cpr, invert_encoder=not args.no_invert,
+        kp=args.kp, max_rpm=args.max_rpm, tolerance_deg=args.tolerance,
+        period_s=args.period,
+    )
+    warning = config.check_tolerance()
+    if warning:
+        log.warning(warning)
+
+    drive = build_drive(args)
+    follower = AngleFollower(drive, config)
+    follower.set_zero_here()
+    log.info("текущее положение принято за 0°")
+
+    source = MouseSource() if args.source == "mouse" else CameraSource()
+    try:
+        if args.headless:
+            return run_headless(follower, args.seconds)
+        return run_gui(follower, source, args)
+    finally:
+        try:
+            drive.stop()
+        finally:
+            drive.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
