@@ -1,0 +1,23 @@
+{
+  "port": "/dev/cu.usbserial-A5069RR4",
+  "slave_id": "1",
+  "baudrate": "19200",
+  "parity": "E",
+  "stopbits": "1",
+  "timeout": "0.50",
+  "speed_rpm": "300",
+  "direction": "reverse",
+  "zero_offset_counts": 0,
+  "counts_per_rev": "131072",
+  "invert_encoder": false,
+  "pid_target_deg": "180",
+  "pid_kp": "0.213333",
+  "pid_ki": "0.019753",
+  "pid_kd": "0.006667",
+  "pid_tolerance_deg": "0.5",
+  "pid_min_rpm": "1",
+  "pid_max_rpm": "20.0",
+  "tune_rpm": "10",
+  "tune_angle": "90",
+  "tune_profile": "Осторожный"
+}

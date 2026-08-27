@@ -42,5 +42,19 @@ MSG
     exit 1
 fi
 
-echo "[3/3] Запускаю..."
-exec "$PY" gui/c30_servo_gui.py
+# Без аргумента берём самую свежую версию в gui/.
+APP="${1:-}"
+if [ -z "$APP" ]; then
+    APP=$(ls -1 gui/c30_servo_gui*.py 2>/dev/null | sort -V | tail -1)
+elif [ ! -f "$APP" ]; then
+    APP="gui/$APP"
+fi
+
+if [ ! -f "$APP" ]; then
+    echo "[ОШИБКА] не нашёл файл GUI. Укажите его явно:"
+    echo "         ./gui/start_c30_servo.command c30_servo_gui_v6_angle360.py"
+    exit 1
+fi
+
+echo "[3/3] Запускаю: $APP"
+exec "$PY" "$APP"
