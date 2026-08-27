@@ -58,7 +58,8 @@ class AxisSpec:
 
     name: str
     device_id: int
-    source: str          # "x" | "y" | "z" — какая координата запястья
+    hand: str            # "Right" | "Left" — с какой руки берём координату
+    source: str          # "x" | "y" — координата запястья в кадре (2D)
     in_min: float
     in_max: float
     span_deg: float
@@ -76,9 +77,11 @@ class AxisSpec:
 
 DEFAULT_AXES = [
     # Диапазоны landmark — из оригинального cv_control.py.
-    AxisSpec("J1 база",   1, "x",  0.2,  0.8, span_deg=90.0),
-    AxisSpec("J2 плечо",  2, "y",  0.2,  0.8, span_deg=60.0, invert=True),
-    AxisSpec("J3 локоть", 3, "z", -0.2,  0.2, span_deg=40.0),
+    # Первая рука ведёт две оси, вторая — третью. Только X и Y: координата Z
+    # у mediapipe оценочная и заметно шумит, в 2D она не нужна.
+    AxisSpec("J1 база",   1, "Right", "x", 0.2, 0.8, span_deg=90.0),
+    AxisSpec("J2 плечо",  2, "Right", "y", 0.2, 0.8, span_deg=60.0, invert=True),
+    AxisSpec("J3 локоть", 3, "Left",  "y", 0.2, 0.8, span_deg=40.0, invert=True),
 ]
 
 
@@ -140,7 +143,14 @@ class HandSource:
     MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
                  "hand_landmarker/float16/1/hand_landmarker.task")
 
-    def __init__(self, camera_index: int = 0, model_path: Path | None = None):
+    #: Кисти различаются по метке mediapipe. Кадр зеркалим для показа, из-за
+    #: чего метки могут оказаться перевёрнуты относительно ощущений — на этот
+    #: случай есть --swap-hands.
+    HANDS = ("Right", "Left")
+
+    def __init__(self, camera_index: int = 0, model_path: Path | None = None,
+                 swap_hands: bool = False):
+        self.swap_hands = swap_hands
         try:
             import cv2
             import mediapipe as mp
@@ -170,7 +180,7 @@ class HandSource:
                 model_asset_path=str(model),
                 delegate=mp_tasks.BaseOptions.Delegate.CPU),
             running_mode=vision.RunningMode.VIDEO,
-            num_hands=1,
+            num_hands=2,
             min_hand_detection_confidence=0.6,
             min_tracking_confidence=0.6,
         )
@@ -189,12 +199,13 @@ class HandSource:
             )
         self._start = time.monotonic()
         self.last_frame = None
-        self.last_wrist = None          # (x, y, z) или None
+        self.hands: dict[str, tuple[float, float]] = {}   # метка -> (x, y)
 
-    def poll(self) -> tuple[float, float, float] | None:
+    def poll(self) -> dict[str, tuple[float, float]]:
+        """Вернуть {"Right": (x, y), "Left": (x, y)} по видимым кистям."""
         ok, frame = self._capture.read()
         if not ok:
-            return None
+            return self.hands
 
         frame = self._cv2.flip(frame, 1)        # зеркало
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
@@ -202,30 +213,50 @@ class HandSource:
         result = self._landmarker.detect_for_video(
             image, int((time.monotonic() - self._start) * 1000))
 
-        if not result.hand_landmarks:
-            self.last_wrist = None
-            self.last_frame = rgb
-            return None
+        found: dict[str, tuple[float, float]] = {}
+        drawable = []
 
-        landmarks = result.hand_landmarks[0]
-        wrist = landmarks[0]
-        self.last_wrist = (wrist.x, wrist.y, wrist.z)
-        self.last_frame = self._draw(rgb, landmarks, wrist)
-        return self.last_wrist
+        for index, landmarks in enumerate(result.hand_landmarks):
+            label = self._label(result, index)
+            wrist = landmarks[0]
+            found[label] = (wrist.x, wrist.y)
+            drawable.append((label, landmarks, wrist))
 
-    def _draw(self, rgb, landmarks, wrist):
+        self.hands = found
+        self.last_frame = self._draw(rgb, drawable)
+        return found
+
+    def _label(self, result, index: int) -> str:
+        """Метка кисти. При неудаче — по порядку обнаружения."""
+        try:
+            label = result.handedness[index][0].category_name
+        except (AttributeError, IndexError):
+            label = self.HANDS[index % len(self.HANDS)]
+        if self.swap_hands:
+            label = "Left" if label == "Right" else "Right"
+        return label
+
+    COLORS = {"Right": (74, 158, 255), "Left": (255, 176, 72)}
+
+    def _draw(self, rgb, drawable):
         cv2 = self._cv2
         frame = rgb.copy()
         height, width = frame.shape[:2]
-        for point in landmarks:
-            cx = int(min(max(point.x, 0.0), 1.0) * width)
-            cy = int(min(max(point.y, 0.0), 1.0) * height)
-            cv2.circle(frame, (cx, cy), 3, (0, 220, 130), -1)
-        wx = int(min(max(wrist.x, 0.0), 1.0) * width)
-        wy = int(min(max(wrist.y, 0.0), 1.0) * height)
-        cv2.line(frame, (wx, 0), (wx, height), (74, 158, 255), 2)
-        cv2.line(frame, (0, wy), (width, wy), (74, 158, 255), 2)
-        cv2.circle(frame, (wx, wy), 9, (255, 255, 255), 2)
+
+        for label, landmarks, wrist in drawable:
+            color = self.COLORS.get(label, (200, 200, 200))
+            for point in landmarks:
+                cx = int(min(max(point.x, 0.0), 1.0) * width)
+                cy = int(min(max(point.y, 0.0), 1.0) * height)
+                cv2.circle(frame, (cx, cy), 3, (0, 220, 130), -1)
+
+            wx = int(min(max(wrist.x, 0.0), 1.0) * width)
+            wy = int(min(max(wrist.y, 0.0), 1.0) * height)
+            cv2.line(frame, (wx, 0), (wx, height), color, 2)
+            cv2.line(frame, (0, wy), (width, wy), color, 2)
+            cv2.circle(frame, (wx, wy), 9, (255, 255, 255), 2)
+            cv2.putText(frame, label, (wx + 14, wy - 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         return frame
 
     def close(self):
@@ -286,8 +317,8 @@ def run_gui(loop: MultiAxisFollower, source: HandSource,
     root.minsize(980, 780)
 
     top = ttk.Label(root, font=("SF Pro Text", 13, "bold"),
-                    text="веди рукой перед камерой: X — база, Y — плечо, "
-                         "Z (ближе/дальше) — локоть")
+                    text="правая рука: X — база, Y — плечо   |   "
+                         "левая рука: Y — локоть")
     top.pack(pady=(12, 6))
 
     video = tk.Label(root, background="#111", foreground="#777",
@@ -297,11 +328,11 @@ def run_gui(loop: MultiAxisFollower, source: HandSource,
     table = ttk.Frame(root)
     table.pack(fill="x", padx=16, pady=12)
 
-    headers = ("ось", "id", "цель", "факт", "ошибка", "об/мин", "состояние")
+    headers = ("ось", "id", "цель", "факт", "ошибка", "об/мин", "состояние", "рука")
     for column, title in enumerate(headers):
         ttk.Label(table, text=title, font=("SF Pro Text", 11, "bold")).grid(
             row=0, column=column, padx=8, sticky="w")
-    table.grid_columnconfigure(6, weight=1)
+    table.grid_columnconfigure(7, weight=1)
 
     rows = {}
     for index, spec in enumerate(specs, start=1):
@@ -312,6 +343,7 @@ def run_gui(loop: MultiAxisFollower, source: HandSource,
             labels.append(label)
         labels[0].config(text=spec.name)
         labels[1].config(text=str(spec.device_id))
+        labels[7].config(text=f"{spec.hand} · {spec.source.upper()}")
         rows[spec.name] = labels
 
     status = ttk.Label(root, text="", font=("SF Pro Text", 11))
@@ -339,12 +371,17 @@ def run_gui(loop: MultiAxisFollower, source: HandSource,
                command=loop.set_zero_here).grid(row=0, column=2, padx=6)
 
     def poll_camera():
-        wrist = source.poll()
-        if wrist is not None and not paused["value"]:
-            x, y, z = wrist
-            values = {"x": x, "y": y, "z": z}
-            loop.set_targets({spec.name: spec.target_deg(values[spec.source])
-                              for spec in specs})
+        hands = source.poll()
+        if not paused["value"]:
+            targets = {}
+            for spec in specs:
+                wrist = hands.get(spec.hand)
+                if wrist is None:
+                    continue        # рука не в кадре — цель этой оси замирает
+                x, y = wrist
+                targets[spec.name] = spec.target_deg({"x": x, "y": y}[spec.source])
+            if targets:
+                loop.set_targets(targets)
         root.after(30, poll_camera)
 
     def draw():
@@ -364,7 +401,11 @@ def run_gui(loop: MultiAxisFollower, source: HandSource,
             labels[3].config(text=f"{t.actual_deg:7.1f}°")
             labels[4].config(text=f"{t.error_deg:+7.1f}°")
             labels[5].config(text=f"{t.command_rpm:+3d}")
-            labels[6].config(text="удержание" if t.holding else "едет")
+            present = spec.hand in source.hands
+            if not present:
+                labels[6].config(text="руки нет — замерла")
+            else:
+                labels[6].config(text="удержание" if t.holding else "едет")
 
         if loop.error_text:
             status.config(text=f"ОСТАНОВЛЕНО: {loop.error_text}",
@@ -372,7 +413,8 @@ def run_gui(loop: MultiAxisFollower, source: HandSource,
         elif loop.warning_text:
             status.config(text=loop.warning_text, foreground="#ffb648")
         else:
-            hand = "рука в кадре" if source.last_wrist else "РУКИ НЕТ — цели замерли"
+            seen = sorted(source.hands)
+            hand = ("в кадре: " + ", ".join(seen)) if seen else "РУК НЕТ — цели замерли"
             mode = "ПАУЗА" if paused["value"] else hand
             drops = f"   сбоев {loop.dropped}" if loop.dropped else ""
             status.config(
@@ -422,6 +464,8 @@ def main() -> int:
     p.add_argument("--sweep", type=float, default=0.12,
                    help="период обхода всех осей, с")
     p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--swap-hands", action="store_true",
+                   help="поменять руки местами, если метки вышли наоборот")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -437,7 +481,7 @@ def main() -> int:
     specs = load_axes()
     print("оси:")
     for spec in specs:
-        print(f"  id={spec.device_id}  {spec.name:<10} <- {spec.source}, "
+        print(f"  id={spec.device_id}  {spec.name:<10} <- {spec.hand} {spec.source.upper()}, "
               f"ход ±{spec.span_deg/2:.0f}°")
     print()
 
@@ -446,7 +490,7 @@ def main() -> int:
     loop.set_zero_here()
     log.info("текущее положение каждой оси принято за ноль")
 
-    source = HandSource(camera_index=args.camera)
+    source = HandSource(camera_index=args.camera, swap_hands=args.swap_hands)
     try:
         return run_gui(loop, source, specs, args)
     finally:
