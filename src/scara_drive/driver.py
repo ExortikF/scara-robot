@@ -319,3 +319,65 @@ class ServoDrive:
         log.info("move_to %d завершён, факт %d (ошибка %d)",
                  target, actual, target - actual)
         return actual
+
+
+class C30AngleIO:
+    """Адаптер :class:`ServoDrive` под интерфейс ``DriveIO`` из :mod:`.goto`.
+
+    Переводит сырые отсчёты энкодера в градусы и обратно, пряча от алгоритма
+    выхода в точку всё, что специфично для C30: два регистра положения,
+    программный ноль, инверсию и разрешение привода.
+
+    Программный ноль (``zero_offset_counts``) и число отсчётов на оборот
+    берутся теми же, что у GUI, — значения совместимы с
+    ``gui/c30_servo_settings.json``.
+    """
+
+    def __init__(self, drive: "ServoDrive", *, counts_per_rev: int = 131072,
+                 zero_offset_counts: int = 0, invert: bool = False) -> None:
+        if counts_per_rev <= 0:
+            raise ValueError("counts_per_rev должно быть положительным")
+        self.drive = drive
+        self.counts_per_rev = counts_per_rev
+        self.zero_offset_counts = zero_offset_counts
+        self.invert = invert
+
+    def enable(self) -> None:
+        """Разрешить привод и встать на удержание нулевой скорости."""
+        self.drive._write(reg.CMD_REGISTER, reg.CMD_HOLD)
+        self.drive.write_param(reg.P_SERVO_ENABLE, 1)
+
+    def read_counts(self) -> int:
+        """Абсолютное многооборотное положение в отсчётах, знаковое 32 бита."""
+        low, high = self.drive._read(reg.REG_ABS_POS_LOW, 2)
+        raw = (high << 16) | low
+        return raw - (1 << 32) if raw & (1 << 31) else raw
+
+    def read_angle(self) -> float:
+        """Механический угол одного оборота, 0 <= a < 360."""
+        delta = self.read_counts() - self.zero_offset_counts
+        if self.invert:
+            delta = -delta
+        return (delta * 360.0 / self.counts_per_rev) % 360.0
+
+    def set_zero_here(self) -> int:
+        """Принять текущее положение за 0°. Возвращает новый offset."""
+        self.zero_offset_counts = self.read_counts()
+        log.info("программный ноль: offset RAW=%d", self.zero_offset_counts)
+        return self.zero_offset_counts
+
+    def read_alarm(self) -> int:
+        return self.drive._read(reg.REG_ALARM, 1)[0]
+
+    # --- интерфейс DriveIO ---
+
+    def set_speed(self, rpm: int) -> None:
+        self.drive.set_speed(int(rpm))
+
+    def run(self, *, reverse: bool) -> None:
+        # Инверсия энкодера означает, что «вперёд» по углу — это «назад» по валу.
+        self.drive.run(reverse=reverse != self.invert)
+
+    def hold(self) -> None:
+        """Останов с сохранением разрешения — вал остаётся под моментом."""
+        self.drive._write(reg.CMD_REGISTER, reg.CMD_HOLD)

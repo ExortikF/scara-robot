@@ -53,6 +53,16 @@ PULS±/SIGN± (руководство C30, гл. 4.2 и 4.3.1). Внутренн
 .venv/bin/python examples/pulse_test.py --dry-run --degrees 90
 ```
 
+## Приехать в заданный угол
+
+```bash
+.venv/bin/python examples/goto_angle.py 90 180 270 0
+.venv/bin/python examples/goto_angle.py 90 --simulate   # без железа
+```
+
+Подъезд уступами с проверкой после остановки — настраивать нечего, PID не
+нужен. Как и почему: [docs/goto_angle.md](docs/goto_angle.md).
+
 ## Начало работы
 
 Поднять связь по RS-485 — пошагово: [docs/rs485_setup.md](docs/rs485_setup.md).
