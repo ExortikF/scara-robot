@@ -16,6 +16,7 @@ PULS±/SIGN± (руководство, гл. 4.2 и 4.3.1); через Modbus э
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -129,9 +130,26 @@ class ServoDrive:
     ...     drive.stop()
     """
 
-    def __init__(self, config: DriveConfig) -> None:
+    def __init__(self, config: DriveConfig, *, client=None,
+                 lock: "threading.Lock | None" = None) -> None:
+        """
+        ``client`` и ``lock`` передаются, когда на одной шине несколько
+        приводов: физический порт один, поэтому клиент общий, а доступ к нему
+        сериализуется замком. См. :class:`scara_drive.bus.DriveBus`.
+        """
         self.config = config
+        self._shared = client is not None
+        self._lock = lock or threading.Lock()
         transport = config.transport
+
+        if client is not None:
+            self._client = client
+            self._where = (f"{transport.host}:{transport.port}"
+                           if isinstance(transport, TcpConfig) else transport.port)
+            self._last_command: int | None = None
+            self._last_speed: int | None = None
+            return
+
         if isinstance(transport, SerialConfig):
             self._client = ModbusSerialClient(
                 port=transport.port,
@@ -164,12 +182,16 @@ class ServoDrive:
     # --- жизненный цикл ---------------------------------------------------
 
     def connect(self) -> None:
+        if self._shared:
+            return          # соединение уже открыто владельцем шины
         if not self._client.connect():
             raise DriveError(f"не открылся порт {self.config.serial.port}")
         log.info("порт %s открыт, slave id=%d",
                  self.config.serial.port, self.config.device_id)
 
     def close(self) -> None:
+        if self._shared:
+            return          # общим клиентом распоряжается DriveBus
         self._client.close()
 
     def __enter__(self) -> "ServoDrive":
@@ -189,9 +211,10 @@ class ServoDrive:
 
     def _read(self, address: int, count: int = 1) -> list[int]:
         try:
-            rr = self._client.read_holding_registers(
-                address, count=count, device_id=self.config.device_id
-            )
+            with self._lock:
+                rr = self._client.read_holding_registers(
+                    address, count=count, device_id=self.config.device_id
+                )
         except ModbusException as exc:
             raise DriveError(f"чтение {address}: {exc}") from exc
         if rr.isError():
@@ -202,9 +225,10 @@ class ServoDrive:
         if not 0 <= value <= 0xFFFF:
             raise ValueError(f"значение {value} не влезает в 16 бит")
         try:
-            rr = self._client.write_register(
-                address, value, device_id=self.config.device_id
-            )
+            with self._lock:
+                rr = self._client.write_register(
+                    address, value, device_id=self.config.device_id
+                )
         except ModbusException as exc:
             raise DriveError(f"запись {value} в {address}: {exc}") from exc
         if rr.isError():

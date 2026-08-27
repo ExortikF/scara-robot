@@ -194,6 +194,19 @@ class AngleFollower:
 
     # --- контур -----------------------------------------------------------
 
+    def step(self) -> None:
+        """Один проход контура. Состояние направления хранится внутри.
+
+        Нужен, когда проходами распоряжается кто-то снаружи — например
+        :class:`MultiAxisFollower`, который обслуживает несколько осей на
+        одной шине по очереди.
+        """
+        self._last_direction = self._one_pass(getattr(self, "_last_direction", None))
+
+    def reset_direction(self) -> None:
+        """Забыть текущее направление: следующий реверс пойдёт через HOLD."""
+        self._last_direction = None
+
     def _one_pass(self, last_direction: str | None) -> str | None:
         cfg = self.config
         raw = self.drive.read_position()
@@ -303,6 +316,112 @@ class AngleFollower:
             self._thread = None
 
     def __enter__(self) -> "AngleFollower":
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop()
+
+
+class MultiAxisFollower:
+    """Несколько осей на одной шине RS-485, один поток, обход по кругу.
+
+    Отдельный поток на ось не годится: шина одна, и потоки всё равно встанут
+    в очередь на замке, но моменты обмена станут непредсказуемыми. Здесь оси
+    обслуживаются строго по очереди, поэтому период обхода известен и
+    одинаков для всех.
+    """
+
+    def __init__(self, followers: dict[str, AngleFollower],
+                 period_s: float = 0.12,
+                 max_consecutive_errors: int = 5):
+        if not followers:
+            raise ValueError("нужна хотя бы одна ось")
+        self.followers = followers
+        self.period_s = period_s
+        self.max_consecutive_errors = max_consecutive_errors
+
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.error_text: str | None = None
+        self.warning_text: str | None = None
+        self.sweeps = 0
+        self.dropped = 0
+        self.sweep_ms = 0.0
+
+    def set_targets(self, targets: dict[str, float]) -> None:
+        for name, degrees in targets.items():
+            self.followers[name].set_target(degrees)
+
+    def set_zero_here(self) -> None:
+        for follower in self.followers.values():
+            follower.set_zero_here()
+
+    def _worker(self) -> None:
+        consecutive = 0
+        last_sweep = time.monotonic()
+
+        for name, follower in self.followers.items():
+            try:
+                follower.drive.enable()
+            except Exception as exc:
+                self.error_text = f"ось {name} не разрешилась: {exc}"
+                return
+
+        while not self._stop.is_set():
+            start = time.monotonic()
+            failed = []
+
+            for name, follower in self.followers.items():
+                if self._stop.is_set():
+                    break
+                try:
+                    follower.step()
+                except Exception as exc:
+                    failed.append(f"{name}: {exc}")
+                    follower.reset_direction()
+
+            if failed:
+                consecutive += 1
+                self.dropped += 1
+                self.warning_text = f"сбой связи ({consecutive} подряд): {'; '.join(failed)}"
+                log.warning(self.warning_text)
+                if consecutive >= self.max_consecutive_errors:
+                    self.error_text = (f"связь потеряна: {consecutive} обходов "
+                                       f"подряд со сбоями. {'; '.join(failed)}")
+                    break
+            else:
+                consecutive = 0
+                self.warning_text = None
+
+            self.sweeps += 1
+            self.sweep_ms = (start - last_sweep) * 1000
+            last_sweep = start
+
+            remaining = self.period_s - (time.monotonic() - start)
+            if remaining > 0:
+                self._stop.wait(remaining)
+
+        for name, follower in self.followers.items():
+            try:
+                follower.drive.hold()
+            except Exception:
+                log.exception("ось %s не встала на удержание", name)
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("контур уже запущен")
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+
+    def __enter__(self) -> "MultiAxisFollower":
         self.start()
         return self
 
