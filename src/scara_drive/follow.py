@@ -214,7 +214,12 @@ class AngleFollower:
         target = self._take_target()
         error = shortest_angle_error(target, actual)
 
-        if abs(error) <= cfg.tolerance_deg:
+        # Встаём на удержание, только если цель ещё и стоит. Иначе при
+        # медленном движении руки ось внутри зоны допуска отпускает привод,
+        # тут же отстаёт и догоняет рывком — ход получается дёрганый.
+        target_moving = (cfg.feedforward
+                         and abs(self._target_rate_deg_s) >= cfg.min_rpm * 6.0)
+        if abs(error) <= cfg.tolerance_deg and not target_moving:
             self.drive.hold()
             self.telemetry = Telemetry(
                 target_deg=target, actual_deg=actual, error_deg=error,

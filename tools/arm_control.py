@@ -97,9 +97,10 @@ POSE_POINTS = {
 class ArmAxis:
     """Ось робота и её связь с суставом человека.
 
-    ``min_deg`` и ``max_deg`` — это **механические пределы оси робота**
-    относительно её нуля, а не диапазон движения человека. Ставьте сюда то,
-    куда ось физически может доехать: за них программа не выйдет никогда.
+    ``min_deg`` и ``max_deg`` — **механические пределы оси робота**
+    относительно её нуля, а не диапазон движения человека. ``null`` в любом из
+    них снимает ограничение с этой стороны: ось будет повторять руку сколько
+    угодно, доезжая по кратчайшей дуге.
 
     Границы раздельные, потому что суставы несимметричны. Локоть человека
     гнётся в одну сторону, и симметричный предел для него бессмыслен: половина
@@ -109,21 +110,32 @@ class ArmAxis:
     name: str
     device_id: int
     joint: str            # "q1" — плечо, "q2" — локоть
-    min_deg: float
-    max_deg: float
+    min_deg: float | None = None      # None — предела нет
+    max_deg: float | None = None
     gain: float = 1.0     # во сколько раз повторять движение человека
     invert: bool = False
 
     def __post_init__(self) -> None:
-        if self.min_deg >= self.max_deg:
+        if (self.min_deg is not None and self.max_deg is not None
+                and self.min_deg >= self.max_deg):
             raise ValueError(f"{self.name}: min_deg должен быть меньше max_deg")
+
+    @property
+    def unlimited(self) -> bool:
+        return self.min_deg is None and self.max_deg is None
+
+    def _scaled(self, joint_deg: float) -> float:
+        value = joint_deg * self.gain
+        return -value if self.invert else value
 
     def target_deg(self, joint_deg: float) -> float:
         """Угол сустава человека -> смещение оси от её нуля."""
-        value = joint_deg * self.gain
-        if self.invert:
-            value = -value
-        return max(self.min_deg, min(value, self.max_deg))
+        value = self._scaled(joint_deg)
+        if self.min_deg is not None:
+            value = max(self.min_deg, value)
+        if self.max_deg is not None:
+            value = min(self.max_deg, value)
+        return value
 
     def is_clamped(self, joint_deg: float) -> bool:
         """Упёрлись ли в предел. Нужно, чтобы показать это в окне.
@@ -131,17 +143,24 @@ class ArmAxis:
         Без такого признака «ось перестала следовать за мной» выглядит
         поломкой, хотя это штатное срабатывание ограничителя.
         """
-        value = joint_deg * self.gain
-        if self.invert:
-            value = -value
-        return not (self.min_deg < value < self.max_deg)
+        value = self._scaled(joint_deg)
+        return ((self.min_deg is not None and value <= self.min_deg)
+                or (self.max_deg is not None and value >= self.max_deg))
+
+    def limits_text(self) -> str:
+        if self.unlimited:
+            return "без предела"
+        low = "—" if self.min_deg is None else f"{self.min_deg:+.0f}"
+        high = "—" if self.max_deg is None else f"{self.max_deg:+.0f}"
+        return f"{low}..{high}°"
 
 
 DEFAULT_AXES = [
-    # Пределы заданы широкими намеренно: узкие мешают, а настоящие границы
-    # известны только вам. Сузьте под реальную механику своего робота.
-    ArmAxis("J1 плечо",  1, "q1", min_deg=-150.0, max_deg=150.0),
-    ArmAxis("J2 локоть", 2, "q2", min_deg=-150.0, max_deg=150.0),
+    # По умолчанию пределов нет: ось повторяет руку один в один, звенья на
+    # схеме совпадают. Если у вашей механики есть упоры — впишите их в
+    # arm_axes.json, программа за них не выйдет.
+    ArmAxis("J1 плечо",  1, "q1"),
+    ArmAxis("J2 локоть", 2, "q2"),
 ]
 
 
@@ -717,7 +736,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         labels[0].config(text=axis.name)
         labels[1].config(text=str(axis.device_id))
         labels[2].config(text="плечо" if axis.joint == "q1" else "локоть")
-        labels[8].config(text=f"{axis.min_deg:+.0f}..{axis.max_deg:+.0f}°")
+        labels[8].config(text=axis.limits_text())
         rows[axis.name] = labels
 
     status = ttk.Label(root, text="", font=("SF Pro Text", 11))
@@ -827,8 +846,8 @@ def run_gui(loop, source, axes, arm_filter, args):
                        else human_joints[1])
                 clamped = axis.is_clamped(raw)
             labels[8].config(
-                text=(f"УПЁРЛАСЬ  {axis.min_deg:+.0f}..{axis.max_deg:+.0f}°"
-                      if clamped else f"{axis.min_deg:+.0f}..{axis.max_deg:+.0f}°"),
+                text=(f"УПЁРЛАСЬ  {axis.limits_text()}" if clamped
+                      else axis.limits_text()),
                 foreground="#ffb648" if clamped else "")
             commanded.append(wrap180(telemetry.actual_deg))
 
@@ -966,13 +985,14 @@ def main() -> int:
 
     p.add_argument("--cpr", type=int, default=131072)
     p.add_argument("--no-invert", action="store_true")
-    p.add_argument("--max-rpm", type=int, default=15)
-    p.add_argument("--kp", type=float, default=0.225)
-    p.add_argument("--tolerance", type=float, default=2.5)
+    p.add_argument("--max-rpm", type=int, default=25)
+    p.add_argument("--kp", type=float, default=0.6,
+                   help="об/мин на градус ошибки; больше — плотнее слежение")
+    p.add_argument("--tolerance", type=float, default=1.5)
     p.add_argument("--period", type=float, default=0.12)
     p.add_argument("--sweep", type=float, default=0.12)
     p.add_argument("--camera", type=int, default=0)
-    p.add_argument("--smoothing", type=float, default=0.45)
+    p.add_argument("--smoothing", type=float, default=0.6)
     p.add_argument("--diag", action="store_true",
                    help="замерить, где теряются кадры, и выйти")
     p.add_argument("--diag-seconds", type=float, default=12.0)
@@ -984,6 +1004,10 @@ def main() -> int:
                    help="допустимый скачок угла за кадр, градусы")
     p.add_argument("--skip-line-check", action="store_true",
                    help="не проверять шину на шум перед запуском")
+    p.add_argument("--no-limits", action="store_true",
+                   help="снять пределы осей: повторять руку без ограничений")
+    p.add_argument("--gain", type=float,
+                   help="переопределить усиление для всех осей")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
@@ -1010,12 +1034,20 @@ def main() -> int:
             source.close()
 
     axes = load_axes()
+    if args.no_limits:
+        for axis in axes:
+            axis.min_deg = axis.max_deg = None
+        log.warning("пределы осей сняты: программа их не удержит, "
+                    "остаётся только механика и аварийный останов")
+    if args.gain is not None:
+        for axis in axes:
+            axis.gain = args.gain
+
     print("оси:")
     for axis in axes:
         joint = "плечо" if axis.joint == "q1" else "локоть"
         print(f"  id={axis.device_id}  {axis.name:<10} <- {joint}, "
-              f"пределы {axis.min_deg:+.0f}..{axis.max_deg:+.0f}°, "
-              f"усиление {axis.gain:g}")
+              f"{axis.limits_text()}, усиление {axis.gain:g}")
     print()
 
     followers, bus = build_followers(args, axes)
@@ -1025,7 +1057,7 @@ def main() -> int:
     source = (PoseArmSource(args.camera, args.side) if args.source == "pose"
               else MarkerArmSource(args.camera))
     source.MIN_VISIBILITY = args.min_visibility
-    arm_filter = ArmFilter(smoothing=args.smoothing,
+    arm_filter = ArmFilter(median_window=3, smoothing=args.smoothing,
                            max_len_change=args.max_len_change,
                            max_jump_deg=args.max_jump)
 
