@@ -129,9 +129,9 @@ class PoseArmSource:
     """Плечо, локоть и запястье с mediapipe Pose."""
 
     name = "pose"
-    MODEL_NAME = "pose_landmarker_lite.task"
+    MODEL_NAME = "pose_landmarker_full.task"
     MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-                 "pose_landmarker_lite/float16/1/pose_landmarker_lite.task")
+                 "pose_landmarker_full/float16/1/pose_landmarker_full.task")
 
     #: Ниже этого mediapipe сам не уверен в точке — такой кадр не берём.
     MIN_VISIBILITY = 0.5
