@@ -40,7 +40,9 @@ import json
 import logging
 import math
 import sys
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -440,6 +442,132 @@ def draw_robot(canvas, width, height, q1_deg, q2_deg, tracked=None):
                        text="зелёное — робот, серое — ваша рука")
 
 
+class VisionWorker:
+    """Камера, распознавание и фильтр — в отдельном потоке.
+
+    Раньше всё это крутилось прямо в колбэке Tk. Даже когда каждый шаг быстрый,
+    их сумма — ожидание кадра от камеры, инференс, фильтр — складывается в
+    десятки миллисекунд, и на это время окно перестаёт отвечать: не
+    перерисовывается, не реагирует на кнопки. Снаружи это выглядит как
+    зависание, хотя программа работает.
+
+    Здесь поток гонит распознавание в своём темпе и складывает результат в
+    ``snapshot``. Окно только читает готовое и рисует, поэтому остаётся
+    отзывчивым при любой скорости распознавания. Кнопка СТОП обязана
+    нажиматься всегда.
+    """
+
+    def __init__(self, source, arm_filter, on_target=None):
+        self.source = source
+        self.filter = arm_filter
+        self.on_target = on_target
+
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+        self.frame = None
+        self.points = None
+        self.angles = None
+        self.smoothed = None
+        self.frame_id = 0
+        self.poll_ms = 0.0
+        self.fps = 0.0
+        self.errors = 0
+        self.last_error = ""
+
+    def snapshot(self):
+        with self._lock:
+            return (self.frame, self.points, self.angles, self.smoothed,
+                    self.frame_id)
+
+    def _worker(self):
+        recent = deque(maxlen=20)
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                self._one_frame()
+            except Exception as exc:
+                self.errors += 1
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                log.exception("сбой при обработке кадра")
+                time.sleep(0.05)      # не крутить сбой на полной скорости
+
+            elapsed = time.monotonic() - started
+            self.poll_ms = elapsed * 1000
+            recent.append(started)
+            if len(recent) > 1:
+                span = recent[-1] - recent[0]
+                self.fps = (len(recent) - 1) / span if span > 0 else 0.0
+
+    def _one_frame(self):
+        points = self.source.poll()
+        angles = None
+        if points is not None:
+            try:
+                angles = angles_from_points(*points)
+                self.source.funnel.hit("углы посчитаны")
+            except ValueError as exc:
+                self.source.funnel.lost(f"геометрия: {exc}")
+
+        smoothed = None
+        if angles is not None:
+            smoothed = self.filter.update(angles)
+            if smoothed is None:
+                self.source.funnel.lost("фильтр отбросил кадр")
+            else:
+                self.source.funnel.hit("фильтр принял")
+
+        with self._lock:
+            self.frame = self.source.last_frame
+            self.points = self.source.last_points
+            self.angles = angles
+            if smoothed is not None:
+                self.smoothed = smoothed
+            self.frame_id += 1
+
+        if smoothed is not None and self.on_target is not None:
+            self.on_target(smoothed)
+
+    def start(self):
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+
+def preflight_line(transport: SerialConfig) -> None:
+    """Убедиться, что линия молчит, пока молчим мы.
+
+    Без этой проверки шумящая шина даёт не внятную ошибку, а зависание:
+    поток мусора не даёт чтению завершиться по таймауту.
+    """
+    from scara_drive.discovery import measure_line_noise
+
+    noise = measure_line_noise(transport.port, transport.baudrate,
+                               transport.parity, seconds=0.5)
+    if noise == 0:
+        log.info("линия чистая")
+        return
+
+    raise SystemExit(
+        f"\nЛИНИЯ ШУМИТ: с молчащей шины пришло {noise} байт за 0.5 с.\n\n"
+        "Работать так нельзя — обмен будет зависать, а приводы поедут по\n"
+        "мусорным показаниям положения.\n\n"
+        "Две обычные причины:\n"
+        "  1. на шине второй ведущий — закройте другие программы с этим\n"
+        "     портом, в том числе C30 Servo GUI;\n"
+        "  2. линия без смещения и терминаторов — подробности:\n"
+        "     python tools/bus_health.py\n\n"
+        "Запустить вопреки проверке: --skip-line-check\n"
+    )
+
+
 def build_followers(args, axes):
     config = FollowConfig(
         counts_per_rev=args.cpr, invert_encoder=not args.no_invert,
@@ -461,6 +589,9 @@ def build_followers(args, axes):
         if port is None:
             raise SystemExit("не нашёл переходник — укажите --port")
         transport = SerialConfig(port=port, baudrate=args.baud, parity=args.parity)
+
+    if isinstance(transport, SerialConfig) and not args.skip_line_check:
+        preflight_line(transport)
 
     bus = DriveBus(transport)
     bus.connect()
@@ -528,6 +659,11 @@ def run_gui(loop, source, axes, arm_filter, args):
     buttons.pack(pady=(0, 14))
 
     def toggle_pause():
+        if not zeroed["value"]:
+            status.config(text="сначала «ноль здесь»: без калибровки цель "
+                               "считается от произвольного угла",
+                          foreground="#ffb648")
+            return
         paused["value"] = not paused["value"]
         pause_button.config(text="ПРОДОЛЖИТЬ" if paused["value"] else "ПАУЗА")
 
@@ -546,8 +682,10 @@ def run_gui(loop, source, axes, arm_filter, args):
             return
         zero["q1"], zero["q2"] = current
         loop.set_zero_here()
+        zeroed["value"] = True
         status.config(text=f"ноль принят: плечо {zero['q1']:.0f}°, "
-                           f"локоть {zero['q2']:.0f}°", foreground="")
+                           f"локоть {zero['q2']:.0f}°. Можно снимать паузу.",
+                      foreground="")
 
     pause_button = ttk.Button(buttons, text="ПРОДОЛЖИТЬ", command=toggle_pause)
     pause_button.grid(row=0, column=0, padx=6)
@@ -556,29 +694,12 @@ def run_gui(loop, source, axes, arm_filter, args):
     ttk.Button(buttons, text="ноль здесь", command=set_zero).grid(
         row=0, column=2, padx=6)
 
-    state = {"angles": None, "smoothed": None}
+    state = {"errors": 0, "last_error": "", "shown_frame": -1}
+    zeroed = {"value": False}
 
-    def poll_once():
-        points = source.poll()
-        angles = None
-        if points is not None:
-            try:
-                angles = angles_from_points(*points)
-                source.funnel.hit("углы посчитаны")
-            except ValueError as exc:
-                source.funnel.lost(f"геометрия: {exc}")
-        state["angles"] = angles
-        if angles is None:
-            return
-
-        smoothed = arm_filter.update(angles)
-        if smoothed is None:
-            source.funnel.lost("фильтр отбросил кадр")
-            return
-        source.funnel.hit("фильтр принял")
-
-        state["smoothed"] = smoothed
-        if paused["value"]:
+    def on_target(smoothed):
+        """Вызывается из потока распознавания."""
+        if paused["value"] or not zeroed["value"]:
             return
         relative = (wrap180(smoothed[0] - zero["q1"]),
                     wrap180(smoothed[1] - zero["q2"]))
@@ -588,25 +709,13 @@ def run_gui(loop, source, axes, arm_filter, args):
             for axis in axes
         })
 
-    def poll_camera():
-        # Опрос обязан пережить любой сбой на одном кадре. Раньше исключение
-        # здесь означало, что root.after в конце не выполнится, цикл опроса
-        # тихо умрёт, и приложение перестанет реагировать на руку насовсем —
-        # при этом окно продолжает рисоваться, будто всё в порядке.
-        try:
-            poll_once()
-        except Exception as exc:
-            state["errors"] = state.get("errors", 0) + 1
-            state["last_error"] = f"{type(exc).__name__}: {exc}"
-            log.exception("сбой в обработке кадра")
-        finally:
-            root.after(25, poll_camera)
+    worker = VisionWorker(source, arm_filter, on_target)
 
     def draw():
         try:
             draw_once()
         except Exception as exc:
-            state["errors"] = state.get("errors", 0) + 1
+            state["errors"] += 1
             state["last_error"] = f"отрисовка: {type(exc).__name__}: {exc}"
             log.exception("сбой отрисовки")
         finally:
@@ -614,9 +723,13 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     def draw_once():
         import cv2
-        frame = source.last_frame
-        if frame is not None:
-            painted = draw_arm(cv2, frame, source.last_points, state["angles"])
+        frame, points, angles, smoothed, frame_id = worker.snapshot()
+
+        # Пересобираем картинку только на новом кадре: превращение массива в
+        # изображение Tk стоит дорого, а распознавание идёт своим темпом.
+        if frame is not None and frame_id != state["shown_frame"]:
+            state["shown_frame"] = frame_id
+            painted = draw_arm(cv2, frame, points, angles)
             image = Image.fromarray(painted)
             image.thumbnail((720, 430))
             photo = ImageTk.PhotoImage(image)
@@ -635,9 +748,9 @@ def run_gui(loop, source, axes, arm_filter, args):
             commanded.append(wrap180(telemetry.actual_deg))
 
         human = None
-        if state["smoothed"] is not None:
-            human = (wrap180(state["smoothed"][0] - zero["q1"]),
-                     wrap180(state["smoothed"][1] - zero["q2"]))
+        if smoothed is not None and zeroed["value"]:
+            human = (wrap180(smoothed[0] - zero["q1"]),
+                     wrap180(smoothed[1] - zero["q2"]))
         draw_robot(robot, 380, 430, commanded[0], commanded[1], human)
 
         if loop.error_text:
@@ -645,30 +758,39 @@ def run_gui(loop, source, axes, arm_filter, args):
                           foreground="#e05252")
         elif loop.warning_text:
             status.config(text=loop.warning_text, foreground="#ffb648")
+        elif not zeroed["value"]:
+            status.config(text="сначала нажмите «ноль здесь» — без этого "
+                               "приводы не поедут", foreground="#ffb648")
         elif paused["value"]:
             status.config(text="ПАУЗА — приводы не двигаются", foreground="#ffb648")
         else:
-            status.config(text=f"ведём   обход {loop.sweep_ms:.0f} мс   "
+            status.config(text=f"ведём   обход шины {loop.sweep_ms:.0f} мс   "
                                f"всего {loop.sweeps}", foreground="")
 
         note = source.funnel.last_loss or source.note
-        errors = state.get("errors", 0)
-        tail = f"   СБОЕВ {errors}: {state.get('last_error', '')}" if errors else ""
-        detector.config(text=f"{source.funnel.report()}   |   {note}{tail}",
-                        foreground="#e05252" if errors else "#888")
+        errors = state["errors"] + worker.errors
+        tail = ""
+        if errors:
+            tail = f"   СБОЕВ {errors}: {worker.last_error or state['last_error']}"
+        detector.config(
+            text=f"распознавание {worker.fps:.0f} к/с ({worker.poll_ms:.0f} мс)   "
+                 f"{source.funnel.report()}   |   {note}{tail}",
+            foreground="#e05252" if errors else "#888")
 
     def shutdown():
+        worker.stop()
         loop.stop()
         source.close()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", shutdown)
     loop.start()
-    poll_camera()
+    worker.start()
     draw()
     try:
         root.mainloop()
     finally:
+        worker.stop()
         loop.stop()
         source.close()
     return 0
@@ -779,6 +901,8 @@ def main() -> int:
                    help="допустимый скачок длины звена за кадр")
     p.add_argument("--max-jump", type=float, default=45.0,
                    help="допустимый скачок угла за кадр, градусы")
+    p.add_argument("--skip-line-check", action="store_true",
+                   help="не проверять шину на шум перед запуском")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
