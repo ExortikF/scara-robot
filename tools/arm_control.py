@@ -55,6 +55,35 @@ log = logging.getLogger("arm_control")
 
 AXES_FILE = Path(__file__).with_name("arm_axes.json")
 
+class Funnel:
+    """Счётчики по стадиям обработки кадра.
+
+    Когда «рука видна, а робот не реагирует», важно знать, на каком именно
+    шаге теряются кадры: камера не отдала, позу не нашли, точка не видна,
+    геометрия не сошлась или фильтр отбросил. Без этого причину приходится
+    угадывать.
+    """
+
+    STAGES = ("кадров", "поза найдена", "точки видны", "углы посчитаны",
+              "фильтр принял")
+
+    def __init__(self):
+        self.counts = dict.fromkeys(self.STAGES, 0)
+        self.last_loss = ""
+
+    def hit(self, stage: str) -> None:
+        self.counts[stage] += 1
+
+    def lost(self, reason: str) -> None:
+        self.last_loss = reason
+
+    def report(self) -> str:
+        frames = self.counts["кадров"] or 1
+        parts = [f"{name} {self.counts[name]} ({self.counts[name] / frames * 100:.0f}%)"
+                 for name in self.STAGES]
+        return "   ".join(parts)
+
+
 # Точки скелета mediapipe Pose.
 POSE_POINTS = {
     "left":  {"shoulder": 11, "elbow": 13, "wrist": 15},
@@ -175,13 +204,16 @@ class PoseArmSource:
         self.last_frame = None
         self.last_points = None
         self.note = ""
+        self.funnel = Funnel()
 
     def poll(self):
         """Вернуть ((плечо), (локоть), (запястье)) в пикселях или None."""
         ok, frame = self._capture.read()
         if not ok:
             self.note = "камера не отдала кадр"
+            self.funnel.lost(self.note)
             return None
+        self.funnel.hit("кадров")
 
         frame = self._cv2.flip(frame, 1)
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
@@ -192,19 +224,27 @@ class PoseArmSource:
         self.last_frame = rgb
         if not result.pose_landmarks:
             self.note = "человека в кадре нет"
+            self.funnel.lost(self.note)
             self.last_points = None
             return None
+        self.funnel.hit("поза найдена")
 
         landmarks = result.pose_landmarks[0]
         height, width = rgb.shape[:2]
         found = {}
         for role, index in self.points.items():
             point = landmarks[index]
-            if getattr(point, "visibility", 1.0) < self.MIN_VISIBILITY:
-                self.note = f"{role}: точка не видна"
+            # visibility у Tasks API — float ИЛИ None, если модель его не
+            # выдала. Сравнивать None с числом нельзя: это исключение, а не
+            # отбраковка, и оно раньше насмерть убивало цикл опроса.
+            visibility = getattr(point, "visibility", None)
+            if visibility is not None and visibility < self.MIN_VISIBILITY:
+                self.note = f"{role}: точка не видна ({visibility:.2f})"
+                self.funnel.lost(self.note)
                 self.last_points = None
                 return None
             found[role] = (point.x * width, point.y * height)
+        self.funnel.hit("точки видны")
 
         self.note = ""
         self.last_points = (found["shoulder"], found["elbow"], found["wrist"])
@@ -253,6 +293,7 @@ class MarkerArmSource:
         self.last_frame = None
         self.last_points = None
         self.note = ""
+        self.funnel = Funnel()
 
     def _find(self, hsv, spec):
         cv2, np = self._cv2, self._np
@@ -275,7 +316,9 @@ class MarkerArmSource:
         ok, frame = self._capture.read()
         if not ok:
             self.note = "камера не отдала кадр"
+            self.funnel.lost(self.note)
             return None
+        self.funnel.hit("кадров")
 
         frame = self._cv2.flip(frame, 1)
         self.last_frame = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
@@ -286,9 +329,12 @@ class MarkerArmSource:
             point = self._find(hsv, self.ranges[role])
             if point is None:
                 self.note = f"метка «{role}» не найдена"
+                self.funnel.lost(self.note)
                 self.last_points = None
                 return None
             found[role] = point
+        self.funnel.hit("поза найдена")
+        self.funnel.hit("точки видны")
 
         self.note = ""
         self.last_points = (found["shoulder"], found["elbow"], found["wrist"])
@@ -512,31 +558,61 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     state = {"angles": None, "smoothed": None}
 
-    def poll_camera():
+    def poll_once():
         points = source.poll()
         angles = None
         if points is not None:
             try:
                 angles = angles_from_points(*points)
-            except ValueError:
-                angles = None
+                source.funnel.hit("углы посчитаны")
+            except ValueError as exc:
+                source.funnel.lost(f"геометрия: {exc}")
         state["angles"] = angles
+        if angles is None:
+            return
 
-        if angles is not None:
-            smoothed = arm_filter.update(angles)
-            if smoothed is not None:
-                state["smoothed"] = smoothed
-                if not paused["value"]:
-                    relative = (wrap180(smoothed[0] - zero["q1"]),
-                                wrap180(smoothed[1] - zero["q2"]))
-                    loop.set_targets({
-                        axis.name: axis.target_deg(
-                            relative[0] if axis.joint == "q1" else relative[1])
-                        for axis in axes
-                    })
-        root.after(25, poll_camera)
+        smoothed = arm_filter.update(angles)
+        if smoothed is None:
+            source.funnel.lost("фильтр отбросил кадр")
+            return
+        source.funnel.hit("фильтр принял")
+
+        state["smoothed"] = smoothed
+        if paused["value"]:
+            return
+        relative = (wrap180(smoothed[0] - zero["q1"]),
+                    wrap180(smoothed[1] - zero["q2"]))
+        loop.set_targets({
+            axis.name: axis.target_deg(
+                relative[0] if axis.joint == "q1" else relative[1])
+            for axis in axes
+        })
+
+    def poll_camera():
+        # Опрос обязан пережить любой сбой на одном кадре. Раньше исключение
+        # здесь означало, что root.after в конце не выполнится, цикл опроса
+        # тихо умрёт, и приложение перестанет реагировать на руку насовсем —
+        # при этом окно продолжает рисоваться, будто всё в порядке.
+        try:
+            poll_once()
+        except Exception as exc:
+            state["errors"] = state.get("errors", 0) + 1
+            state["last_error"] = f"{type(exc).__name__}: {exc}"
+            log.exception("сбой в обработке кадра")
+        finally:
+            root.after(25, poll_camera)
 
     def draw():
+        try:
+            draw_once()
+        except Exception as exc:
+            state["errors"] = state.get("errors", 0) + 1
+            state["last_error"] = f"отрисовка: {type(exc).__name__}: {exc}"
+            log.exception("сбой отрисовки")
+        finally:
+            root.after(50, draw)
+
+    def draw_once():
         import cv2
         frame = source.last_frame
         if frame is not None:
@@ -575,13 +651,11 @@ def run_gui(loop, source, axes, arm_filter, args):
             status.config(text=f"ведём   обход {loop.sweep_ms:.0f} мс   "
                                f"всего {loop.sweeps}", foreground="")
 
-        total = arm_filter.accepted + arm_filter.rejected
-        share = arm_filter.rejected / total * 100 if total else 0.0
-        detector.config(
-            text=f"источник {source.name}   принято {arm_filter.accepted}   "
-                 f"отброшено {arm_filter.rejected} ({share:.0f}%)   "
-                 f"{source.note}")
-        root.after(50, draw)
+        note = source.funnel.last_loss or source.note
+        errors = state.get("errors", 0)
+        tail = f"   СБОЕВ {errors}: {state.get('last_error', '')}" if errors else ""
+        detector.config(text=f"{source.funnel.report()}   |   {note}{tail}",
+                        foreground="#e05252" if errors else "#888")
 
     def shutdown():
         loop.stop()
@@ -597,6 +671,77 @@ def run_gui(loop, source, axes, arm_filter, args):
     finally:
         loop.stop()
         source.close()
+    return 0
+
+
+def run_diag(source, arm_filter, seconds: float) -> int:
+    """Померить, на какой стадии теряются кадры. Без окна и без приводов."""
+    print(f"замер {seconds:g} с — держите руку в кадре и подвигайте ей\n")
+    start = time.monotonic()
+    last_print = 0.0
+
+    while time.monotonic() - start < seconds:
+        points = source.poll()
+        if points is not None:
+            try:
+                angles = angles_from_points(*points)
+                source.funnel.hit("углы посчитаны")
+                if arm_filter.update(angles) is not None:
+                    source.funnel.hit("фильтр принял")
+                else:
+                    source.funnel.lost("фильтр отбросил кадр")
+            except ValueError as exc:
+                source.funnel.lost(f"геометрия: {exc}")
+
+        elapsed = time.monotonic() - start
+        if elapsed - last_print >= 1.0:
+            last_print = elapsed
+            print(f"  {elapsed:4.0f} с   {source.funnel.report()}")
+
+    counts = source.funnel.counts
+    frames = counts["кадров"]
+    print("\n" + "=" * 62)
+    if not frames:
+        print("камера не отдала ни одного кадра.")
+        return 1
+
+    print(f"{'стадия':<18} {'кадров':>8} {'доля':>7}   потеряно на шаге")
+    print("-" * 62)
+    previous = frames
+    worst = (0, "")
+    for stage in Funnel.STAGES:
+        value = counts[stage]
+        dropped = previous - value if stage != "кадров" else 0
+        if dropped > worst[0]:
+            worst = (dropped, stage)
+        print(f"{stage:<18} {value:>8} {value / frames * 100:>6.0f}%   "
+              f"{dropped if stage != 'кадров' else '':>6}")
+        previous = value
+
+    passed = counts["фильтр принял"]
+    print("-" * 62)
+    print(f"\nдо привода дошло {passed} из {frames} кадров "
+          f"({passed / frames * 100:.0f}%), это {passed / seconds:.1f} обновлений в секунду")
+
+    if passed / frames > 0.7:
+        print("\nТракт распознавания в порядке.")
+    elif worst[1] == "поза найдена":
+        print("\nБольше всего теряется на поиске позы: модель не видит человека.")
+        print("Вид сверху для неё нетипичен. Что пробовать:")
+        print("  * попасть в кадр целиком — плечи и корпус, не только руку;")
+        print("  * добавить света, убрать контровой свет за спиной;")
+        print("  * --source markers — три цветные метки, ракурс им безразличен.")
+    elif worst[1] == "точки видны":
+        print("\nПоза находится, но конкретный сустав модель считает скрытым.")
+        print("Строка «потеряно» выше называет какой. Что пробовать:")
+        print("  * повернуть камеру так, чтобы сустав не перекрывался;")
+        print("  * --side left, если управляете другой рукой;")
+        print("  * ослабить порог: --min-visibility 0.2")
+    elif worst[1] == "фильтр принял":
+        print("\nТочки находятся, но фильтр считает движение неправдоподобным.")
+        print("Обычно это дёрганое распознавание. Что пробовать:")
+        print("  * --max-len-change 0.4 и --max-jump 70 — ослабить отсев;")
+        print("  * --source markers — распознавание стабильнее в принципе.")
     return 0
 
 
@@ -625,17 +770,39 @@ def main() -> int:
     p.add_argument("--sweep", type=float, default=0.12)
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--smoothing", type=float, default=0.45)
+    p.add_argument("--diag", action="store_true",
+                   help="замерить, где теряются кадры, и выйти")
+    p.add_argument("--diag-seconds", type=float, default=12.0)
+    p.add_argument("--min-visibility", type=float, default=0.5,
+                   help="порог видимости сустава, ниже — кадр отбрасывается")
+    p.add_argument("--max-len-change", type=float, default=0.25,
+                   help="допустимый скачок длины звена за кадр")
+    p.add_argument("--max-jump", type=float, default=45.0,
+                   help="допустимый скачок угла за кадр, градусы")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s")
 
-    if not args.simulate and not args.confirm:
+    if not (args.simulate or args.confirm or args.diag):
         print(__doc__)
         print("Запустите с --confirm, когда оси будут разгружены, "
-              "или с --simulate для проверки без железа.")
+              "с --simulate для проверки без железа "
+              "или с --diag, чтобы померить распознавание.")
         return 1
+
+    if args.diag:
+        source = (PoseArmSource(args.camera, args.side) if args.source == "pose"
+                  else MarkerArmSource(args.camera))
+        source.MIN_VISIBILITY = args.min_visibility
+        arm_filter = ArmFilter(smoothing=args.smoothing,
+                               max_len_change=args.max_len_change,
+                               max_jump_deg=args.max_jump)
+        try:
+            return run_diag(source, arm_filter, args.diag_seconds)
+        finally:
+            source.close()
 
     axes = load_axes()
     print("оси:")
@@ -651,7 +818,10 @@ def main() -> int:
 
     source = (PoseArmSource(args.camera, args.side) if args.source == "pose"
               else MarkerArmSource(args.camera))
-    arm_filter = ArmFilter(smoothing=args.smoothing)
+    source.MIN_VISIBILITY = args.min_visibility
+    arm_filter = ArmFilter(smoothing=args.smoothing,
+                           max_len_change=args.max_len_change,
+                           max_jump_deg=args.max_jump)
 
     try:
         return run_gui(loop, source, axes, arm_filter, args)
