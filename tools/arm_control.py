@@ -95,27 +95,53 @@ POSE_POINTS = {
 
 @dataclass
 class ArmAxis:
-    """Ось робота и её связь с суставом человека."""
+    """Ось робота и её связь с суставом человека.
+
+    ``min_deg`` и ``max_deg`` — это **механические пределы оси робота**
+    относительно её нуля, а не диапазон движения человека. Ставьте сюда то,
+    куда ось физически может доехать: за них программа не выйдет никогда.
+
+    Границы раздельные, потому что суставы несимметричны. Локоть человека
+    гнётся в одну сторону, и симметричный предел для него бессмыслен: половина
+    хода не нужна, а нужной половины не хватает.
+    """
 
     name: str
     device_id: int
     joint: str            # "q1" — плечо, "q2" — локоть
-    span_deg: float       # полный допустимый ход относительно нуля
+    min_deg: float
+    max_deg: float
     gain: float = 1.0     # во сколько раз повторять движение человека
     invert: bool = False
+
+    def __post_init__(self) -> None:
+        if self.min_deg >= self.max_deg:
+            raise ValueError(f"{self.name}: min_deg должен быть меньше max_deg")
 
     def target_deg(self, joint_deg: float) -> float:
         """Угол сустава человека -> смещение оси от её нуля."""
         value = joint_deg * self.gain
         if self.invert:
             value = -value
-        half = self.span_deg / 2
-        return max(-half, min(value, half))
+        return max(self.min_deg, min(value, self.max_deg))
+
+    def is_clamped(self, joint_deg: float) -> bool:
+        """Упёрлись ли в предел. Нужно, чтобы показать это в окне.
+
+        Без такого признака «ось перестала следовать за мной» выглядит
+        поломкой, хотя это штатное срабатывание ограничителя.
+        """
+        value = joint_deg * self.gain
+        if self.invert:
+            value = -value
+        return not (self.min_deg < value < self.max_deg)
 
 
 DEFAULT_AXES = [
-    ArmAxis("J1 плечо",  1, "q1", span_deg=120.0),
-    ArmAxis("J2 локоть", 2, "q2", span_deg=120.0),
+    # Пределы заданы широкими намеренно: узкие мешают, а настоящие границы
+    # известны только вам. Сузьте под реальную механику своего робота.
+    ArmAxis("J1 плечо",  1, "q1", min_deg=-150.0, max_deg=150.0),
+    ArmAxis("J2 локоть", 2, "q2", min_deg=-150.0, max_deg=150.0),
 ]
 
 
@@ -126,8 +152,28 @@ def load_axes() -> list[ArmAxis]:
                        indent=2), encoding="utf-8")
         log.info("создан %s — пределы осей правьте там", AXES_FILE.name)
         return DEFAULT_AXES
-    return [ArmAxis(**item) for item in
-            json.loads(AXES_FILE.read_text(encoding="utf-8"))]
+    axes = []
+    migrated = False
+    for item in json.loads(AXES_FILE.read_text(encoding="utf-8")):
+        # Старые файлы описывали ход одним симметричным span_deg. Молча
+        # уронить их нельзя, поэтому переводим в пару границ.
+        if "span_deg" in item:
+            half = item.pop("span_deg") / 2
+            item.setdefault("min_deg", -half)
+            item.setdefault("max_deg", half)
+            migrated = True
+            log.warning("%s: span_deg=%g переведён в пределы %+g..%+g — "
+                        "проверьте их в %s", item["name"], half * 2,
+                        -half, half, AXES_FILE.name)
+        axes.append(ArmAxis(**item))
+
+    if migrated:
+        AXES_FILE.write_text(
+            json.dumps([asdict(a) for a in axes], ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        log.warning("%s переписан в новый формат — проверьте пределы",
+                    AXES_FILE.name)
+    return axes
 
 
 class SimulatedAxis:
@@ -405,41 +451,59 @@ def _arc(cv2, frame, centre, base_deg, sweep_deg, label):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.62, COLOR_ARC, 2)
 
 
-def draw_robot(canvas, width, height, q1_deg, q2_deg, tracked=None):
-    """Схема робота сверху по КОМАНДНЫМ углам осей.
+class RobotView:
+    """Схема робота сверху. Элементы создаются один раз и потом двигаются.
 
-    Рядом бледным контуром — поза руки человека. Расхождение между ними и
-    есть отставание робота: видно сразу, без чтения таблицы.
+    Раньше на каждом кадре канва очищалась и рисовалась заново. Tk при этом
+    успевает показать пустой холст между стиранием и отрисовкой, и окно
+    заметно мигает. Здесь фигуры живут постоянно, а меняются только их
+    координаты — мигания нет и рисуется дешевле.
     """
-    canvas.delete("all")
-    origin_x, origin_y = width * 0.5, height * 0.72
-    l1, l2 = height * 0.30, height * 0.24
 
-    for radius in (l1 + l2, l1):
-        canvas.create_oval(origin_x - radius, origin_y - radius,
-                           origin_x + radius, origin_y + radius,
-                           outline="#2c2c2c")
+    def __init__(self, canvas, width: int, height: int):
+        self.canvas = canvas
+        self.width, self.height = width, height
+        self.origin = (width * 0.5, height * 0.72)
+        self.l1, self.l2 = height * 0.30, height * 0.24
 
-    def chain(q1, q2, colour, width_px, tag):
-        a1 = math.radians(q1)
-        elbow = (origin_x + l1 * math.cos(a1), origin_y - l1 * math.sin(a1))
-        a2 = math.radians(q1 + q2)
-        tip = (elbow[0] + l2 * math.cos(a2), elbow[1] - l2 * math.sin(a2))
-        canvas.create_line(origin_x, origin_y, *elbow, fill=colour,
-                           width=width_px, capstyle="round", tags=tag)
-        canvas.create_line(*elbow, *tip, fill=colour, width=width_px,
-                           capstyle="round", tags=tag)
+        ox, oy = self.origin
+        for radius in (self.l1 + self.l2, self.l1):
+            canvas.create_oval(ox - radius, oy - radius, ox + radius,
+                               oy + radius, outline="#2c2c2c")
+
+        self.human = [canvas.create_line(0, 0, 0, 0, fill="#4a5a6a", width=4,
+                                         capstyle="round") for _ in range(2)]
+        self.robot = [canvas.create_line(0, 0, 0, 0, fill="#3ddc84", width=7,
+                                         capstyle="round") for _ in range(2)]
+        self.dots = [canvas.create_oval(0, 0, 0, 0, fill="#ffffff", outline="")
+                     for _ in range(3)]
+        canvas.create_text(width * 0.5, height - 14, fill="#777",
+                           text="зелёное — робот, серое — ваша рука")
+
+    def _chain(self, q1_deg: float, q2_deg: float):
+        ox, oy = self.origin
+        a1 = math.radians(q1_deg)
+        elbow = (ox + self.l1 * math.cos(a1), oy - self.l1 * math.sin(a1))
+        a2 = math.radians(q1_deg + q2_deg)
+        tip = (elbow[0] + self.l2 * math.cos(a2), elbow[1] - self.l2 * math.sin(a2))
         return elbow, tip
 
-    if tracked is not None:
-        chain(tracked[0], tracked[1], "#4a5a6a", 4, "human")
+    def update(self, q1_deg: float, q2_deg: float, tracked=None) -> None:
+        ox, oy = self.origin
 
-    elbow, tip = chain(q1_deg, q2_deg, "#3ddc84", 7, "robot")
-    for point in ((origin_x, origin_y), elbow, tip):
-        canvas.create_oval(point[0] - 5, point[1] - 5, point[0] + 5,
-                           point[1] + 5, fill="#ffffff", outline="")
-    canvas.create_text(width * 0.5, height - 14, fill="#777",
-                       text="зелёное — робот, серое — ваша рука")
+        if tracked is None:
+            for item in self.human:
+                self.canvas.coords(item, 0, 0, 0, 0)
+        else:
+            elbow, tip = self._chain(*tracked)
+            self.canvas.coords(self.human[0], ox, oy, *elbow)
+            self.canvas.coords(self.human[1], *elbow, *tip)
+
+        elbow, tip = self._chain(q1_deg, q2_deg)
+        self.canvas.coords(self.robot[0], ox, oy, *elbow)
+        self.canvas.coords(self.robot[1], *elbow, *tip)
+        for item, (x, y) in zip(self.dots, ((ox, oy), elbow, tip)):
+            self.canvas.coords(item, x - 5, y - 5, x + 5, y + 5)
 
 
 class VisionWorker:
@@ -547,10 +611,13 @@ def preflight_line(transport: SerialConfig) -> None:
     Без этой проверки шумящая шина даёт не внятную ошибку, а зависание:
     поток мусора не даёт чтению завершиться по таймауту.
     """
-    from scara_drive.discovery import measure_line_noise
+    from scara_drive.discovery import PortGoneError, measure_line_noise
 
-    noise = measure_line_noise(transport.port, transport.baudrate,
-                               transport.parity, seconds=0.5)
+    try:
+        noise = measure_line_noise(transport.port, transport.baudrate,
+                                   transport.parity, seconds=0.5)
+    except PortGoneError as exc:
+        raise SystemExit(f"\n{exc}\n") from exc
     if noise == 0:
         log.info("линия чистая")
         return
@@ -628,15 +695,17 @@ def run_gui(loop, source, axes, arm_filter, args):
     robot = tk.Canvas(middle, width=380, height=430, background="#151515",
                       highlightthickness=0)
     robot.grid(row=0, column=1, padx=(14, 0), sticky="ns")
+    robot_view = RobotView(robot, 380, 430)
     middle.grid_columnconfigure(0, weight=1)
 
     table = ttk.Frame(root)
     table.pack(fill="x", padx=16, pady=10)
-    headers = ("ось", "id", "сустав", "цель", "факт", "ошибка", "об/мин", "состояние")
+    headers = ("ось", "id", "сустав", "цель", "факт", "ошибка", "об/мин",
+               "состояние", "пределы")
     for column, title in enumerate(headers):
         ttk.Label(table, text=title, font=("SF Pro Text", 11, "bold")).grid(
             row=0, column=column, padx=8, sticky="w")
-    table.grid_columnconfigure(7, weight=1)
+    table.grid_columnconfigure(8, weight=1)
 
     rows = {}
     for index, axis in enumerate(axes, start=1):
@@ -648,6 +717,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         labels[0].config(text=axis.name)
         labels[1].config(text=str(axis.device_id))
         labels[2].config(text="плечо" if axis.joint == "q1" else "локоть")
+        labels[8].config(text=f"{axis.min_deg:+.0f}..{axis.max_deg:+.0f}°")
         rows[axis.name] = labels
 
     status = ttk.Label(root, text="", font=("SF Pro Text", 11))
@@ -736,6 +806,11 @@ def run_gui(loop, source, axes, arm_filter, args):
             keep["frame"] = photo
             video.configure(image=photo, text="")
 
+        human_joints = None
+        if smoothed is not None and zeroed["value"]:
+            human_joints = (wrap180(smoothed[0] - zero["q1"]),
+                            wrap180(smoothed[1] - zero["q2"]))
+
         commanded = []
         for axis in axes:
             telemetry = loop.followers[axis.name].telemetry
@@ -745,13 +820,19 @@ def run_gui(loop, source, axes, arm_filter, args):
             labels[5].config(text=f"{telemetry.error_deg:+7.1f}°")
             labels[6].config(text=f"{telemetry.command_rpm:+3d}")
             labels[7].config(text="удержание" if telemetry.holding else "едет")
+
+            clamped = False
+            if human_joints is not None:
+                raw = (human_joints[0] if axis.joint == "q1"
+                       else human_joints[1])
+                clamped = axis.is_clamped(raw)
+            labels[8].config(
+                text=(f"УПЁРЛАСЬ  {axis.min_deg:+.0f}..{axis.max_deg:+.0f}°"
+                      if clamped else f"{axis.min_deg:+.0f}..{axis.max_deg:+.0f}°"),
+                foreground="#ffb648" if clamped else "")
             commanded.append(wrap180(telemetry.actual_deg))
 
-        human = None
-        if smoothed is not None and zeroed["value"]:
-            human = (wrap180(smoothed[0] - zero["q1"]),
-                     wrap180(smoothed[1] - zero["q2"]))
-        draw_robot(robot, 380, 430, commanded[0], commanded[1], human)
+        robot_view.update(commanded[0], commanded[1], human_joints)
 
         if loop.error_text:
             status.config(text=f"ОСТАНОВЛЕНО: {loop.error_text}",
@@ -933,7 +1014,8 @@ def main() -> int:
     for axis in axes:
         joint = "плечо" if axis.joint == "q1" else "локоть"
         print(f"  id={axis.device_id}  {axis.name:<10} <- {joint}, "
-              f"ход ±{axis.span_deg / 2:.0f}°, усиление {axis.gain:g}")
+              f"пределы {axis.min_deg:+.0f}..{axis.max_deg:+.0f}°, "
+              f"усиление {axis.gain:g}")
     print()
 
     followers, bus = build_followers(args, axes)

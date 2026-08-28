@@ -3,7 +3,8 @@
     "name": "J1 плечо",
     "device_id": 1,
     "joint": "q1",
-    "span_deg": 120.0,
+    "min_deg": -60.0,
+    "max_deg": 60.0,
     "gain": 1.0,
     "invert": false
   },
@@ -11,7 +12,8 @@
     "name": "J2 локоть",
     "device_id": 2,
     "joint": "q2",
-    "span_deg": 120.0,
+    "min_deg": -60.0,
+    "max_deg": 60.0,
     "gain": 1.0,
     "invert": false
   }

@@ -29,10 +29,10 @@ from scara_drive.discovery import guess_port
 
 
 def listen(port: str, baud: int, parity: str, seconds: float) -> bytes:
-    import serial
+    from scara_drive.discovery import open_serial
 
-    with serial.Serial(port, baudrate=baud, parity=parity, bytesize=8,
-                       stopbits=1, timeout=0.1) as ser:
+    with open_serial(port, baudrate=baud, parity=parity, bytesize=8,
+                     stopbits=1, timeout=0.1) as ser:
         ser.reset_input_buffer()
         collected = bytearray()
         deadline = time.monotonic() + seconds

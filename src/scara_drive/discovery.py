@@ -75,6 +75,49 @@ def guess_port() -> str | None:
     return candidates[0].device if len(candidates) == 1 else None
 
 
+class PortGoneError(OSError):
+    """Переходник пропал с шины USB."""
+
+
+def open_serial(port: str, **kwargs):
+    """Открыть порт, переводя тёмные ошибки в понятные.
+
+    Когда USB-переходник отваливается, узел ``/dev/cu.*`` какое-то время ещё
+    существует, но настройка порта проваливается с ``termios error (22,
+    Invalid argument)``. Догадаться по такому тексту, что дело в выдернутом
+    кабеле, невозможно, поэтому проверяем наличие узла и объясняем прямо.
+    """
+    import os
+    import serial
+
+    if not os.path.exists(port):
+        raise PortGoneError(
+            f"порт {port} исчез — переходник отключился от USB.\n"
+            "Проверьте кабель и разъём, затем посмотрите, вернулся ли он:\n"
+            "    python examples/ports.py"
+        )
+    try:
+        return serial.Serial(port, **kwargs)
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, PortGoneError):
+            raise
+        if not os.path.exists(port):
+            raise PortGoneError(
+                f"порт {port} пропал во время открытия — переходник отвалился "
+                f"от USB прямо сейчас.\nПроверьте кабель и разъём."
+            ) from exc
+        raise PortGoneError(
+            f"порт {port} не открывается: {exc}\n\n"
+            "Узел в системе есть, но настроить его не удалось. Обычно это\n"
+            "значит, что переходник отвалился от USB, а узел ещё не убран.\n"
+            "Что делать:\n"
+            "  1. вынуть и вставить переходник;\n"
+            "  2. проверить, что он вернулся:  python examples/ports.py\n"
+            "  3. если пропадает регулярно — дело в кабеле, разъёме или\n"
+            "     питании; RS-485 при этом может дёргать землю."
+        ) from exc
+
+
 def measure_line_noise(port: str, baudrate: int, parity: str,
                        seconds: float = 0.5) -> int:
     """Сколько байт прилетает с молчащей линии за ``seconds``.
@@ -87,10 +130,8 @@ def measure_line_noise(port: str, baudrate: int, parity: str,
     бесконечно читает мусор, и программа выглядит повисшей, хотя приводы
     отвечают корректно.
     """
-    import serial
-
-    with serial.Serial(port, baudrate=baudrate, parity=parity, bytesize=8,
-                       stopbits=1, timeout=0.05) as ser:
+    with open_serial(port, baudrate=baudrate, parity=parity, bytesize=8,
+                     stopbits=1, timeout=0.05) as ser:
         ser.reset_input_buffer()
         seen = 0
         deadline = time.monotonic() + seconds

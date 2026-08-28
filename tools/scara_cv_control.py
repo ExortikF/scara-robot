@@ -270,10 +270,13 @@ def preflight_line(transport: SerialConfig) -> None:
     Без этой проверки шумящая шина приводит не к внятной ошибке, а к
     зависанию: поток мусора не даёт чтению завершиться по таймауту.
     """
-    from scara_drive.discovery import measure_line_noise
+    from scara_drive.discovery import PortGoneError, measure_line_noise
 
-    noise = measure_line_noise(transport.port, transport.baudrate,
-                               transport.parity, seconds=0.5)
+    try:
+        noise = measure_line_noise(transport.port, transport.baudrate,
+                                   transport.parity, seconds=0.5)
+    except PortGoneError as exc:
+        raise SystemExit(f"\n{exc}\n") from exc
     if noise == 0:
         log.info("линия чистая")
         return
