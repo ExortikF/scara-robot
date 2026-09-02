@@ -399,10 +399,14 @@ class C30AngleIO:
         self.drive.write_param(reg.P_SERVO_ENABLE, 1)
 
     def read_counts(self) -> int:
-        """Абсолютное многооборотное положение в отсчётах, знаковое 32 бита."""
-        low, high = self.drive._read(reg.REG_ABS_POS_LOW, 2)
-        raw = (high << 16) | low
-        return raw - (1 << 32) if raw & (1 << 31) else raw
+        """Абсолютное многооборотное положение в отсчётах, знаковое 32 бита.
+
+        Сборка 32 бит живёт в :meth:`ServoDrive.read_position` в одном
+        экземпляре. Второй копии здесь быть не должно: она игнорировала бы
+        ``position_word_order``, и при обратном порядке слов две части
+        программы читали бы у одного привода разное положение.
+        """
+        return self.drive.read_position()
 
     def read_angle(self) -> float:
         """Механический угол одного оборота, 0 <= a < 360."""
