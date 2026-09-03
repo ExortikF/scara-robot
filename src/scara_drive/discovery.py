@@ -79,6 +79,10 @@ class PortGoneError(OSError):
     """Переходник пропал с шины USB."""
 
 
+class PortBusyError(OSError):
+    """Порт держит другая программа."""
+
+
 def open_serial(port: str, **kwargs):
     """Открыть порт, переводя тёмные ошибки в понятные.
 
@@ -87,6 +91,7 @@ def open_serial(port: str, **kwargs):
     Invalid argument)``. Догадаться по такому тексту, что дело в выдернутом
     кабеле, невозможно, поэтому проверяем наличие узла и объясняем прямо.
     """
+    import errno
     import os
     import serial
 
@@ -101,6 +106,18 @@ def open_serial(port: str, **kwargs):
     except (OSError, ValueError) as exc:
         if isinstance(exc, PortGoneError):
             raise
+        # Порт занят: узел на месте, устройство живо, просто его уже
+        # открыл кто-то другой. Путать это с отвалившимся кабелем нельзя —
+        # советы получаются противоположные.
+        if getattr(exc, "errno", None) == errno.EBUSY or "Resource busy" in str(exc):
+            raise PortBusyError(
+                f"порт {port} занят другой программой.\n\n"
+                "Последовательный порт держит только одна программа за раз.\n"
+                "Чаще всего это:\n"
+                "  * монитор порта в Arduino IDE — закройте его;\n"
+                "  * ещё один запущенный скрипт с этим портом;\n"
+                "  * C30 Servo GUI, если речь про шину приводов."
+            ) from exc
         if not os.path.exists(port):
             raise PortGoneError(
                 f"порт {port} пропал во время открытия — переходник отвалился "

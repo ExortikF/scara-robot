@@ -24,7 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scara_drive.discovery import PortGoneError, list_ports, open_serial
+from scara_drive.discovery import (PortBusyError, PortGoneError,
+                                   list_ports, open_serial)
 
 SOUND_DIR = Path("/System/Library/Sounds")
 
@@ -106,18 +107,20 @@ def main() -> int:
         else:
             play_sound(args.sound or "Frog")
 
+    # Порт открываем до баннера: иначе сообщение об ошибке печатается
+    # после жизнерадостного «слушаю...», и читать это неудобно.
+    try:
+        ser = open_serial(port, baudrate=args.baud, timeout=0.2)
+    except (PortGoneError, PortBusyError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
     print(f"слушаю {port} на {args.baud}")
     if args.say is not None:
         print(f"говорю: {'случайную фразу' if args.random else args.say}")
     else:
         print(f"звук: {'случайный' if args.random else (args.sound or 'Frog')}")
     print("щёлкайте концевиком. Ctrl-C для выхода.\n")
-
-    try:
-        ser = open_serial(port, baudrate=args.baud, timeout=0.2)
-    except PortGoneError as exc:
-        print(exc, file=sys.stderr)
-        return 1
 
     hits = 0
     try:
@@ -139,7 +142,7 @@ def main() -> int:
                     fire(False)
     except KeyboardInterrupt:
         print(f"\nвсего срабатываний: {hits}")
-    except PortGoneError as exc:
+    except (PortGoneError, PortBusyError) as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 1
     return 0
