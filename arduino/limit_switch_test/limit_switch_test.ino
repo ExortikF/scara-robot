@@ -203,10 +203,26 @@ void setup() {
   }
   Serial.println();
   Serial.println("замкните концевик — появится строка");
+  Serial.println("(отправьте любой символ, чтобы повторить состояние)");
+  Serial.println();
+}
+
+/*
+  Монитор порта подключается уже после загрузки платы, поэтому всё
+  напечатанное в setup() до него не доходит — выглядит это как «скетч
+  ничего не выводит». Любой символ из монитора печатает состояние заново.
+*/
+void reprintOnRequest() {
+  if (!Serial.available()) return;
+  while (Serial.available()) Serial.read();
+  Serial.println();
+  Serial.println("─── текущее состояние ───");
+  for (uint8_t i = 0; i < COUNT; i++) report(i, stableState[i]);
   Serial.println();
 }
 
 void loop() {
+  reprintOnRequest();
   bool anyClosed = false;
 
   for (uint8_t i = 0; i < COUNT; i++) {

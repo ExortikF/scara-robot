@@ -67,40 +67,68 @@ void printTable() {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  while (!Serial && millis() < 3000) { }
+/*
+  Сводка печатается ПОВТОРНО, а не один раз при запуске.
 
+  Монитор порта в Arduino IDE подключается уже после того, как плата
+  загрузилась и отработала setup(). Всё, что напечатано там, до монитора
+  просто не доходит, и выглядит это как «скетч ничего не выводит».
+  Поэтому сводка повторяется, пока концевик не найден, и печатается по
+  любому символу, отправленному из монитора.
+*/
+void printSummary() {
   Serial.println();
-  Serial.println("=== поиск вывода концевика ===");
+  Serial.println("═══ поиск вывода концевика ═══");
+  Serial.println("нажимайте и отпускайте концевик — назову нужный GPIO");
   Serial.println();
-  Serial.println("НЕ ТРОГАЙТЕ концевик — снимаю исходное состояние...");
-  delay(1200);
+  printTable();
 
+  uint8_t heldLow = 0;
+  for (uint8_t i = 0; i < COUNT; i++) if (baseline[i] == HELD_LOW) heldLow++;
+  if (heldLow) {
+    Serial.print("прижато к земле выводов: ");
+    Serial.print(heldLow);
+    Serial.println("  (замкнутый концевик или светодиод платы)");
+  }
+  Serial.println();
+}
+
+void takeBaseline() {
   for (uint8_t i = 0; i < COUNT; i++) {
     current[i] = probe(PINS[i]);
     baseline[i] = current[i];
     changes[i] = 0;
   }
-
-  Serial.println();
-  printTable();
-  Serial.println();
-
-  uint8_t heldLow = 0;
-  for (uint8_t i = 0; i < COUNT; i++) if (baseline[i] == HELD_LOW) heldLow++;
-  if (heldLow) {
-    Serial.print("выводов, прижатых к земле: ");
-    Serial.println(heldLow);
-    Serial.println("это либо уже замкнутый концевик, либо светодиод платы");
-    Serial.println();
-  }
-
-  Serial.println("ТЕПЕРЬ нажимайте и отпускайте концевик");
-  Serial.println();
 }
 
+void setup() {
+  Serial.begin(115200);
+  delay(300);                    // дать порту подняться
+
+  takeBaseline();
+  printSummary();
+}
+
+uint32_t lastSummaryMs = 0;
+bool found = false;
+
 void loop() {
+  // Любой символ из монитора — напечатать сводку заново.
+  if (Serial.available()) {
+    while (Serial.available()) Serial.read();
+    takeBaseline();
+    Serial.println("(состояние снято заново)");
+    printSummary();
+    lastSummaryMs = millis();
+  }
+
+  // Пока вывод не найден, повторять сводку — чтобы её увидел монитор,
+  // подключившийся с опозданием.
+  if (!found && millis() - lastSummaryMs > 4000) {
+    lastSummaryMs = millis();
+    printSummary();
+  }
+
   for (uint8_t i = 0; i < COUNT; i++) {
     State now = probe(PINS[i]);
     if (now == current[i]) continue;
@@ -118,6 +146,7 @@ void loop() {
 
     if (changes[i] >= 2) {
       Serial.print("   <<< ЭТО ВАШ ВЫВОД");
+      found = true;              // сводку больше не повторяем
     }
     Serial.println();
 
