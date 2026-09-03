@@ -5,9 +5,13 @@
 
     python tools/switch_sound.py                 звук по умолчанию
     python tools/switch_sound.py --list          что вообще доступно
-    python tools/switch_sound.py --sound Frog
-    python tools/switch_sound.py --say "ой" --voice Bubbles
+    python tools/switch_sound.py --sound squeak
     python tools/switch_sound.py --random        каждый раз новый
+    python tools/switch_sound.py --release       и на размыкание тоже
+    python tools/switch_sound.py --say "ой" --voice Bubbles
+
+Звуки лежат в папке sounds/ рядом с проектом. Чтобы добавить свой,
+просто положите туда файл — wav, aiff, mp3 или m4a.
 
 ВАЖНО: порт может держать только одна программа. Закройте монитор порта
 в Arduino IDE, иначе скрипт его не откроет.
@@ -27,11 +31,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from scara_drive.discovery import (PortBusyError, PortGoneError,
                                    list_ports, open_serial)
 
-SOUND_DIR = Path("/System/Library/Sounds")
+SOUND_DIR = Path(__file__).resolve().parents[1] / "sounds"
 
-# Отобраны по звучанию: короткие и с характером. Длинные и унылые
-# (Basso, Blow, Morse) в список не берём — на каждом нажатии надоедают.
-FUNNY_SOUNDS = ["Frog", "Sosumi", "Submarine", "Purr", "Pop", "Bottle", "Funk"]
+# Порядок задаёт и порядок в --list, и вероятность при --random.
+# Тромбон длиннее прочих в пять раз, поэтому в случайную выдачу не идёт:
+# при частых щелчках он накладывался бы сам на себя. Вызывается только
+# по имени — как звук для размыкания он как раз хорош.
+LONG_SOUNDS = {"trombone"}
 
 FUNNY_PHRASES = [
     "оба-на", "приехали", "опа", "туда нельзя", "ай", "стоп машина",
@@ -42,11 +48,22 @@ FUNNY_PHRASES = [
 def available_sounds() -> list[str]:
     if not SOUND_DIR.is_dir():
         return []
-    return sorted(p.stem for p in SOUND_DIR.glob("*.aiff"))
+    return sorted(p.stem for p in SOUND_DIR.iterdir()
+                  if p.suffix.lower() in (".wav", ".aiff", ".mp3", ".m4a"))
+
+
+def sound_path(name: str) -> Path | None:
+    for candidate in SOUND_DIR.glob(f"{name}.*"):
+        if candidate.suffix.lower() in (".wav", ".aiff", ".mp3", ".m4a"):
+            return candidate
+    return None
 
 
 def play_sound(name: str) -> None:
-    path = SOUND_DIR / f"{name}.aiff"
+    path = sound_path(name)
+    if path is None:
+        print(f"нет такого звука: {name}", file=sys.stderr)
+        return
     # Не ждём окончания: концевик могут щёлкать быстрее, чем играет звук,
     # и блокировка здесь превратилась бы в отставание от железа.
     subprocess.Popen(["afplay", str(path)],
@@ -73,18 +90,26 @@ def main() -> int:
                    help="каждый раз новый звук или фраза")
     p.add_argument("--release", action="store_true",
                    help="звучать и на размыкание тоже")
+    p.add_argument("--release-sound", default="trombone",
+                   help="что играть на размыкание при --release")
     p.add_argument("--list", action="store_true", help="показать варианты и выйти")
     args = p.parse_args()
 
     if args.list:
-        print("системные звуки (--sound):")
-        for name in available_sounds():
-            mark = "  ← смешной" if name in FUNNY_SOUNDS else ""
+        names = available_sounds()
+        if not names:
+            print(f"в папке {SOUND_DIR} нет звуковых файлов")
+            return 1
+        print(f"звуки из {SOUND_DIR.name}/ (--sound):")
+        for name in names:
+            mark = "  — длинный, в --random не участвует" if name in LONG_SOUNDS else ""
             print(f"  {name}{mark}")
         print("\nголоса (--voice): Bubbles, Boing, Jester, Trinoids, Zarvox,")
         print("                  Cellos, Wobble, Superstar, Bells, Milena")
-        print("\nпослушать:  afplay /System/Library/Sounds/Frog.aiff")
+        print(f"\nпослушать:  afplay {SOUND_DIR}/splat.wav")
         print("            say -v Bubbles 'оба-на'")
+        print(f"\nсвои звуки просто кладите в {SOUND_DIR.name}/ — "
+              "wav, aiff, mp3 или m4a")
         return 0
 
     port = args.port
@@ -116,14 +141,27 @@ def main() -> int:
             return 1
         port = found[0].device
 
+    names = available_sounds()
+    if not names and args.say is None:
+        print(f"в папке {SOUND_DIR} нет звуковых файлов", file=sys.stderr)
+        return 1
+
+    if args.sound and args.sound not in names:
+        print(f"нет звука «{args.sound}». Доступны: {', '.join(names)}",
+              file=sys.stderr)
+        return 1
+
+    shuffle_pool = [n for n in names if n not in LONG_SOUNDS] or names
+    default_sound = args.sound or ("splat" if "splat" in names else names[0])
+
     def fire(closed: bool) -> None:
         if args.say is not None:
             speak(random.choice(FUNNY_PHRASES) if args.random else args.say,
                   args.voice)
         elif args.random:
-            play_sound(random.choice(FUNNY_SOUNDS))
+            play_sound(random.choice(shuffle_pool))
         else:
-            play_sound(args.sound or "Frog")
+            play_sound(default_sound if closed else args.release_sound)
 
     # Порт открываем до баннера: иначе сообщение об ошибке печатается
     # после жизнерадостного «слушаю...», и читать это неудобно.
@@ -137,7 +175,9 @@ def main() -> int:
     if args.say is not None:
         print(f"говорю: {'случайную фразу' if args.random else args.say}")
     else:
-        print(f"звук: {'случайный' if args.random else (args.sound or 'Frog')}")
+        print(f"звук: {'случайный' if args.random else default_sound}")
+        if args.release:
+            print(f"на размыкание: {args.release_sound}")
     print("щёлкайте концевиком. Ctrl-C для выхода.\n")
 
     hits = 0
