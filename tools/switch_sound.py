@@ -91,10 +91,28 @@ def main() -> int:
     if port is None:
         # Плата ESP32 — это USB-переходник, тот же поиск, что и для RS-485.
         found = list_ports()
-        if len(found) != 1:
-            print("не понял, какой порт брать — укажите --port", file=sys.stderr)
+        if not found:
+            # Ноль кандидатов и несколько кандидатов — разные беды, и
+            # советы у них разные. Раньше оба случая выдавали одно и то же
+            # «не понял, какой порт брать», что для пустого списка неверно.
+            print("плата не подключена: в системе нет ни одного "
+                  "USB-порта.\n", file=sys.stderr)
+            print("проверьте по порядку:", file=sys.stderr)
+            print("  1. воткнута ли плата;", file=sys.stderr)
+            print("  2. КАБЕЛЬ — многие идут только для зарядки, без "
+                  "сигнальных жил.", file=sys.stderr)
+            print("     Плата с таким кабелем светится, но компьютер её "
+                  "не видит;", file=sys.stderr)
+            print("  3. воткните напрямую, без хаба;", file=sys.stderr)
+            print("  4. видит ли её система на уровне USB:", file=sys.stderr)
+            print("     ioreg -p IOUSB -l -w 0 | grep -i 'USB Product'",
+                  file=sys.stderr)
+            return 1
+        if len(found) > 1:
+            print("несколько подходящих портов — укажите нужный через "
+                  "--port:", file=sys.stderr)
             for item in found:
-                print(f"  кандидат: {item}", file=sys.stderr)
+                print(f"  {item}", file=sys.stderr)
             return 1
         port = found[0].device
 
