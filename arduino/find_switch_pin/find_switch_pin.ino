@@ -29,6 +29,8 @@
                  состояние тем же способом невозможно
 */
 
+#include <string.h>
+
 const uint8_t PINS[] = {
   2, 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
 };
@@ -40,6 +42,29 @@ const char* STATE_NAME[] = {"свободен", "прижат к GND", "прит
 State current[COUNT];
 State baseline[COUNT];
 uint32_t changes[COUNT];
+uint16_t heldMv[COUNT];        // напряжение на выводе, если он прижат вниз
+
+/*
+  Отличить замкнутый концевик от светодиода платы.
+
+  Оба дают на выводе логический ноль, и по digitalRead они неразличимы. Но
+  напряжение разное: провод на землю сажает вывод почти в ноль, а светодиод
+  с резистором образует с внутренней подтяжкой делитель, и на выводе
+  остаётся заметное напряжение — около полутора вольт.
+
+  Меряем АЦП при включённой подтяжке вверх.
+
+    ниже 300 мВ    жёсткое соединение с землёй — это провод или концевик
+    выше 800 мВ    нагрузка, почти наверняка светодиод платы
+*/
+uint16_t measurePulledUp(uint8_t pin) {
+  pinMode(pin, INPUT_PULLUP);
+  delay(2);
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < 8; i++) sum += analogRead(pin);
+  // АЦП отдаёт 0…4095 на диапазон примерно 0…3.3 В
+  return (uint16_t)((sum / 8) * 3300UL / 4095UL);
+}
 
 State probe(uint8_t pin) {
   pinMode(pin, INPUT_PULLUP);
@@ -56,14 +81,29 @@ State probe(uint8_t pin) {
 }
 
 void printTable() {
-  Serial.println("  GPIO   состояние");
-  Serial.println("  ─────  ──────────────────");
+  Serial.println("  GPIO   состояние         напряжение   вывод");
+  Serial.println("  ─────  ────────────────  ──────────   ─────────────────────");
   for (uint8_t i = 0; i < COUNT; i++) {
     Serial.print("  ");
     if (PINS[i] < 10) Serial.print(' ');
     Serial.print(PINS[i]);
     Serial.print("     ");
-    Serial.println(STATE_NAME[current[i]]);
+    Serial.print(STATE_NAME[current[i]]);
+    for (uint8_t s = strlen(STATE_NAME[current[i]]); s < 18; s++) Serial.print(' ');
+
+    if (current[i] == HELD_LOW) {
+      Serial.print(heldMv[i]);
+      Serial.print(" мВ");
+      if (heldMv[i] < 300) {
+        Serial.println("      провод на землю (концевик)");
+      } else if (heldMv[i] > 800) {
+        Serial.println("     нагрузка — светодиод платы");
+      } else {
+        Serial.println("     непонятно, померьте тестером");
+      }
+    } else {
+      Serial.println();
+    }
   }
 }
 
@@ -83,12 +123,16 @@ void printSummary() {
   Serial.println();
   printTable();
 
-  uint8_t heldLow = 0;
-  for (uint8_t i = 0; i < COUNT; i++) if (baseline[i] == HELD_LOW) heldLow++;
-  if (heldLow) {
-    Serial.print("прижато к земле выводов: ");
-    Serial.print(heldLow);
-    Serial.println("  (замкнутый концевик или светодиод платы)");
+  for (uint8_t i = 0; i < COUNT; i++) {
+    if (baseline[i] == HELD_LOW && heldMv[i] < 300) {
+      Serial.println();
+      Serial.print("GPIO");
+      Serial.print(PINS[i]);
+      Serial.println(" соединён с землёй напрямую.");
+      Serial.println("Если концевик СЕЙЧАС РАЗОМКНУТ — значит провод сидит");
+      Serial.println("на этом выводе, и это он вам и нужен.");
+      Serial.println("Если ЗАМКНУТ — отпустите и посмотрите, освободится ли.");
+    }
   }
   Serial.println();
 }
@@ -98,6 +142,7 @@ void takeBaseline() {
     current[i] = probe(PINS[i]);
     baseline[i] = current[i];
     changes[i] = 0;
+    heldMv[i] = (current[i] == HELD_LOW) ? measurePulledUp(PINS[i]) : 0;
   }
 }
 
