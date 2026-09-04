@@ -332,9 +332,10 @@ class AngleFollower:
         overshoot = self.beyond_limit(actual)
         if overshoot:
             # Ось за пределом. Глухо запрещать движение нельзя: тогда из
-            # этого состояния не выбраться иначе как руками. Вместо этого
-            # целью становится ближайшая граница — ось возвращается в зону.
-            target = actual - overshoot
+            # этого состояния не выбраться иначе как руками. Целью
+            # становится сам предел, а не край допуска на перелёт: иначе
+            # ось замирала бы у самой границы, в зоне нечувствительности.
+            target = self.clamp_motor(actual)
             error = self.angle_error(target, actual)
             self.out_of_range = abs(overshoot)
 
