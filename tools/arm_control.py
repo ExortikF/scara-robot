@@ -471,28 +471,42 @@ class MarkerArmSource:
         self._capture.release()
 
 
-def list_cameras(max_index: int = 6) -> list[tuple[int, int, int]]:
+def list_cameras(max_index: int = 6, snapshot_dir: Path | None = None):
     """Найти доступные камеры перебором индексов.
 
-    OpenCV на macOS не отдаёт имена устройств, только порядковые номера,
-    поэтому единственный способ узнать, где какая камера, — открыть и
-    посмотреть разрешение. RealSense подключается как обычная USB-камера
-    и виден здесь же: его цветной поток берётся без всякого SDK, как с
-    веб-камеры. Карта глубины при этом недоступна, но она и не нужна —
+    OpenCV на macOS не отдаёт имена устройств, только порядковые номера.
+    Разрешение тоже различает не всегда: встроенная камера ноутбука и
+    цветной поток RealSense обе дают 1920x1080. Поэтому с каждой камеры
+    снимается кадр — по картинке видно сразу.
+
+    RealSense подключается как обычная USB-камера, цветной поток берётся
+    без всякого SDK. Карта глубины при этом недоступна, но она и не нужна:
     углы считаются по плоскому кадру.
     """
     import cv2
 
-    found = []
+    found, misses = [], 0
     for index in range(max_index):
         capture = cv2.VideoCapture(index)
         if not capture.isOpened():
             capture.release()
+            misses += 1
+            # Пустых индексов подряд достаточно, чтобы остановиться: иначе
+            # OpenCV засыпает терминал руганью про несуществующие камеры.
+            if misses >= 2 and found:
+                break
             continue
+
+        misses = 0
         ok, frame = capture.read()
         if ok and frame is not None:
             height, width = frame.shape[:2]
-            found.append((index, width, height))
+            saved = None
+            if snapshot_dir is not None:
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                saved = snapshot_dir / f"camera{index}.jpg"
+                cv2.imwrite(str(saved), frame)
+            found.append((index, width, height, saved))
         capture.release()
     return found
 
@@ -1255,7 +1269,8 @@ def main() -> int:
                         format="%(levelname)s %(message)s")
 
     if args.list_cameras:
-        cameras = list_cameras()
+        shots = Path(__file__).resolve().parents[1] / "camera_shots"
+        cameras = list_cameras(snapshot_dir=shots)
         if not cameras:
             print("камер не найдено.")
             print("на macOS доступ выдаётся приложению, из которого запущен")
@@ -1264,10 +1279,15 @@ def main() -> int:
             print("  и безопасность -> Камера, затем перезапустите Терминал.")
             return 1
         print("доступные камеры:\n")
-        for index, width, height in cameras:
-            print(f"  --camera {index}   {width}x{height}")
-        print("\nимён OpenCV на macOS не отдаёт — различайте по разрешению")
-        print("и по тому, какая пропадает при отключении кабеля.")
+        for index, width, height, saved in cameras:
+            line = f"  --camera {index}   {width}x{height}"
+            if saved:
+                line += f"   кадр: {saved.name}"
+            print(line)
+        if any(c[3] for c in cameras):
+            print(f"\nкадры сохранены в {shots}")
+            print("откройте их — по картинке видно, какая камера какая:")
+            print(f"    open {shots}")
         return 0
 
     if not (args.simulate or args.confirm or args.diag):
