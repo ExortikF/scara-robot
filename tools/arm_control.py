@@ -1019,6 +1019,56 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
     return config
 
 
+def run_test_move(loop, axes, degrees: float, seconds: float) -> int:
+    """Погонять оси настоящим контуром, но без камеры.
+
+    Отделяет две вещи, которые снаружи выглядят одинаково: «не работает
+    управление приводами» и «не распознаётся рука». Здесь цель ставится
+    руками, поэтому если оси поехали — весь тракт до приводов исправен, и
+    искать надо в распознавании.
+    """
+    import time
+
+    print(f"\nпроверка хода: цель ±{degrees:g}° сустава, по {seconds:g} с\n")
+    loop.start()
+    try:
+        for target in (degrees, -degrees, 0.0):
+            print(f"  цель {target:+.0f}° сустава")
+            loop.set_targets({a.name: a.motor_target(target) for a in axes})
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                time.sleep(0.4)
+                parts = []
+                for a in axes:
+                    tel = loop.followers[a.name].telemetry
+                    parts.append(f"{a.name.split()[0]} "
+                                 f"{a.motor_to_joint(tel.actual_deg):+6.1f}° "
+                                 f"{tel.command_rpm:+4d}об/м")
+                print("     " + "   ".join(parts))
+                if loop.error_text:
+                    print(f"\n  АВАРИЯ: {loop.error_text}")
+                    return 1
+    finally:
+        loop.stop()
+
+    print("\nитог:")
+    moved = False
+    for a in axes:
+        tel = loop.followers[a.name].telemetry
+        joint = a.motor_to_joint(tel.actual_deg)
+        print(f"  {a.name}: сустав {joint:+.1f}°, проходов контура {tel.passes}")
+        if tel.passes > 5:
+            moved = True
+
+    if moved:
+        print("\nконтур работает и команды до приводов доходят.")
+        print("Если при этом рука не следует за вашей — дело в распознавании:")
+        print("    python tools/arm_control.py --diag")
+    else:
+        print("\nконтур не сделал ни одного прохода — смотрите ошибки выше.")
+    return 0
+
+
 def run_gui(loop, source, axes, arm_filter, args):
     import tkinter as tk
     from tkinter import ttk
@@ -1444,6 +1494,9 @@ def main() -> int:
                    help="допустимый перелёт за предел, градусов вала")
     p.add_argument("--runaway-passes", type=int, default=6,
                    help="проходов с растущей ошибкой до аварийной остановки")
+    p.add_argument("--test-move", type=float, metavar="ГРАДУСЫ",
+                   help="погонять оси без камеры на заданный угол сустава")
+    p.add_argument("--test-seconds", type=float, default=4.0)
     p.add_argument("--skip-mode-check", action="store_true",
                    help="не проверять режим приводов перед запуском")
     p.add_argument("--skip-line-check", action="store_true",
@@ -1503,7 +1556,8 @@ def main() -> int:
             print(f"    open {shots}")
         return 0
 
-    if not (args.simulate or args.confirm or args.diag):
+    if not (args.simulate or args.confirm or args.diag
+            or args.test_move is not None):
         print(__doc__)
         print("Запустите с --confirm, когда оси будут разгружены, "
               "с --simulate для проверки без железа "
@@ -1550,6 +1604,16 @@ def main() -> int:
     followers, bus = build_followers(args, axes)
     loop = MultiAxisFollower(followers, period_s=args.sweep)
     loop.set_zero_here()
+
+    if args.test_move is not None:
+        try:
+            return run_test_move(loop, axes, args.test_move, args.test_seconds)
+        finally:
+            if bus is not None:
+                try:
+                    bus.stop_all()
+                finally:
+                    bus.close()
 
     source = (PoseArmSource(args.camera, args.side, realsense=args.realsense)
               if args.source == "pose"

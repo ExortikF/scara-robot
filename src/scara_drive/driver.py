@@ -282,9 +282,16 @@ class ServoDrive:
         self.write_param(self.config.speed_param, speed)
 
     def enable(self) -> None:
-        """Разрешить привод и встать на удержание нулевой скорости."""
+        """Разрешить привод и встать на удержание нулевой скорости.
+
+        Порядок важен и взят из штатной программы производителя: сначала
+        привод переводится в режим JOG командой удержания, и только потом
+        включается разрешение. В обратном порядке часть приводов
+        разрешение не подхватывает.
+        """
+        self._write(self.config.cmd_register, reg.CMD_HOLD)
+        self._last_command = reg.CMD_HOLD
         self.write_param(reg.P_SERVO_ENABLE, 1)
-        self.hold()
 
     def hold(self) -> None:
         """Удержание на нулевой скорости, привод остаётся под током."""
