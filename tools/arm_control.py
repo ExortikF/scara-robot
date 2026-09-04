@@ -1185,12 +1185,14 @@ def run_gui(loop, source, axes, arm_filter, args):
     ttk.Button(buttons, text="СБРОС ОШИБКИ", command=clear_fault).grid(
         row=0, column=5, padx=6)
 
-    state = {"errors": 0, "last_error": "", "shown_frame": -1}
+    state = {"errors": 0, "last_error": "", "shown_frame": -1,
+             "last_target_ms": 0.0}
     zeroed = {"value": False}
     relaxed = {"value": False}
 
     def on_target(smoothed):
         """Вызывается из потока распознавания."""
+        state["last_target_ms"] = time.monotonic()
         if paused["value"] or not zeroed["value"]:
             return
         relative = (wrap180(smoothed[0] - zero["q1"]),
@@ -1274,6 +1276,15 @@ def run_gui(loop, source, axes, arm_filter, args):
         elif not zeroed["value"]:
             status.config(text="сначала «СЕРЕДИНА ЗДЕСЬ» — без неё "
                                "приводы не поедут", foreground="#ffb648")
+        elif (not paused["value"] and zeroed["value"]
+              and time.monotonic() - state["last_target_ms"] > 2.0):
+            # Самый обидный отказ: всё запущено, приводы отвечают, а руку
+            # не видно — цели не обновляются, и вал стоит. Молчать об этом
+            # нельзя, снаружи это неотличимо от поломки.
+            status.config(
+                text="РУКУ НЕ ВИЖУ — цели не обновляются, робот стоит. "
+                     "Смотрите строку распознавания ниже.",
+                foreground="#e05252")
         elif relaxed["value"]:
             status.config(text="МОМЕНТ СНЯТ — оси свободны, положение "
                                "обновляется", foreground="#ffb648")
