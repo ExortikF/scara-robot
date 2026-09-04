@@ -180,6 +180,7 @@ class AngleFollower:
         self._commanded_rpm = 0.0         # что скомандовано сейчас, со знаком
         self._worse_passes = 0            # подряд проходов с растущей ошибкой
         self._last_abs_error: float | None = None
+        self._last_actual: float | None = None
         self._out_passes = 0              # подряд проходов с растущим выходом
         self._last_overshoot: float | None = None
         self.fault: str | None = None     # причина аварийной остановки
@@ -380,30 +381,34 @@ class AngleFollower:
             self._out_passes = 0
             self._last_overshoot = None
 
-        # ── слой 3: ось едет не в ту сторону ──────────────────────────
+        # ── слой 3: вал идёт не туда, куда скомандовано ───────────────
         #
-        # Привод работает, а ошибка растёт проход за проходом — значит знак
-        # где-то перевёрнут. Это самый опасный отказ: ось разгоняется в
-        # упор, и с редуктором момент туда приходит умноженный.
-        if last_direction is not None:
-            magnitude = abs(error)
-            if (self._last_abs_error is not None
-                    and magnitude > self._last_abs_error + 0.5):
-                self._worse_passes += 1
-            else:
-                self._worse_passes = 0
+        # Признак перевёрнутого знака именно этот: командуем «вперёд», а
+        # вал уходит назад. Раньше здесь стоял рост ошибки, и это было
+        # неверно: когда цель убегает быстрее, чем ось успевает — а при
+        # слежении за рукой так бывает постоянно, — ошибка растёт при
+        # совершенно исправной оси, и защита срабатывала впустую.
+        #
+        # Сравнение движения с командой от скорости цели не зависит вовсе.
+        if self._last_actual is not None and abs(self._commanded_rpm) >= 1.0:
+            moved = actual - self._last_actual
+            if abs(moved) > 0.05:                 # мельче — шум энкодера
+                if moved * self._commanded_rpm < 0:
+                    self._worse_passes += 1
+                else:
+                    self._worse_passes = 0
             if self._worse_passes >= cfg.runaway_passes:
                 self.drive.hold()
                 self.fault = (
-                    f"ось уезжает от цели: ошибка росла {self._worse_passes} "
-                    f"проходов подряд и дошла до {magnitude:.0f}°. "
-                    f"Похоже, перевёрнут знак — проверьте invert_encoder "
-                    f"и reverse у этой оси.")
+                    f"вал идёт против команды: скомандовано "
+                    f"{self._commanded_rpm:+.0f} об/мин, а положение уходит "
+                    f"в другую сторону, {self._worse_passes} проходов подряд. "
+                    f"Перевёрнут знак — проверьте invert_encoder и reverse "
+                    f"у этой оси.")
                 raise DriveFault(self.fault)
-            self._last_abs_error = magnitude
         else:
-            self._last_abs_error = abs(error)
             self._worse_passes = 0
+        self._last_actual = actual
 
         # Встаём на удержание, только если цель ещё и стоит. Иначе при
         # медленном движении руки ось внутри зоны допуска отпускает привод,
@@ -427,11 +432,23 @@ class AngleFollower:
         if abs(demand) < 1e-9:
             demand = math.copysign(cfg.min_rpm, error)
 
-        # Ограничение ускорения: скорость меняется постепенно, а не скачком.
-        # Считаем в знаковых об/мин, чтобы через ноль проходить плавно.
+        # Ограничение ускорения: скорость нарастает постепенно, а не
+        # скачком. ТОРМОЖЕНИЕ И РАЗВОРОТ НЕ ОГРАНИЧИВАЕМ.
+        #
+        # Иначе после перелёта цели команда ещё несколько проходов
+        # направлена в прежнюю сторону, пока плавно спадает через ноль.
+        # Ошибка в это время растёт, ось действительно уезжает, и защита
+        # справедливо принимает это за перевёрнутый знак. Сбрасывать
+        # скорость надо сразу — это и безопаснее, и ремню легче, чем
+        # продолжать разгон не в ту сторону.
         wanted = max(-cfg.max_rpm, min(cfg.max_rpm, demand))
-        step = cfg.max_rpm_step
-        self._commanded_rpm += max(-step, min(wanted - self._commanded_rpm, step))
+        current = self._commanded_rpm
+        speeding_up = (wanted * current >= 0) and abs(wanted) > abs(current)
+        if speeding_up:
+            step = cfg.max_rpm_step
+            self._commanded_rpm = current + max(-step, min(wanted - current, step))
+        else:
+            self._commanded_rpm = wanted
 
         signed = self._commanded_rpm
         if abs(signed) < cfg.min_rpm:
@@ -575,6 +592,7 @@ class MultiAxisFollower:
             follower.fault = None
             follower._worse_passes = 0
             follower._last_abs_error = None
+            follower._last_actual = None
             follower._out_passes = 0
             follower._last_overshoot = None
 
