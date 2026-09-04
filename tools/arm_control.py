@@ -684,21 +684,42 @@ def draw_arm(cv2, rgb, points, angles):
         cv2.circle(frame, point, radius, (0, 0, 0), 2)
 
     if angles is not None:
-        _arc(cv2, frame, shoulder, 0.0, angles.q1_deg, f"q1 {angles.q1_deg:+.0f}")
-        _arc(cv2, frame, elbow, angles.q1_deg, angles.q2_deg,
-             f"q2 {angles.q2_deg:+.0f}")
+        # Плечо: от горизонтали до первого звена.
+        _arc(cv2, frame, shoulder, 0.0, angles.q1_deg,
+             f"{angles.q1_deg:+.0f}", offset=(14, -54))
+
+        # Локоть рисуем ВНУТРИ сгиба: от направления «локоть -> плечо» к
+        # «локоть -> запястье». Раньше дуга шла от продолжения плеча, то
+        # есть по внешней стороне руки, и это выглядело неправильно —
+        # человек ждёт увидеть угол между самими звеньями.
+        #
+        # Подпись тоже анатомическая: 180° у прямой руки, меньше по мере
+        # сгибания. Управление по-прежнему считает q2 (отклонение от
+        # прямой), но показывать удобнее привычную величину.
+        back = angles.q1_deg + 180.0
+        inner = 180.0 - angles.q2_deg
+        _arc(cv2, frame, elbow, back, -inner, f"{abs(wrap180(inner)):.0f}",
+             offset=(14, -54))
     return frame
 
 
-def _arc(cv2, frame, centre, base_deg, sweep_deg, label):
-    """Дуга угла от base_deg на sweep_deg. Y на экране вниз, отсюда минусы."""
-    radius = 46
+def _arc(cv2, frame, centre, base_deg, sweep_deg, label, offset=(14, -54)):
+    """Дуга от base_deg на sweep_deg. Y на экране вниз, отсюда минусы."""
+    import math
+
+    radius = 42
     start = -base_deg
     end = -(base_deg + sweep_deg)
     cv2.ellipse(frame, centre, (radius, radius), 0.0,
                 min(start, end), max(start, end), COLOR_ARC, 3)
-    cv2.putText(frame, label, (centre[0] + 14, centre[1] - radius - 8),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.62, COLOR_ARC, 2)
+
+    # Подпись ставим на биссектрису дуги, а не в фиксированную точку:
+    # иначе при некоторых позах она наезжает на звенья.
+    middle = math.radians(-(base_deg + sweep_deg / 2.0))
+    tx = int(centre[0] + (radius + 22) * math.cos(middle))
+    ty = int(centre[1] + (radius + 22) * math.sin(middle))
+    cv2.putText(frame, label, (tx - 14, ty + 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_ARC, 2)
 
 
 class RobotView:
@@ -1343,10 +1364,28 @@ def run_gui(loop, source, axes, arm_filter, args):
             # Самый обидный отказ: всё запущено, приводы отвечают, а руку
             # не видно — цели не обновляются, и вал стоит. Молчать об этом
             # нельзя, снаружи это неотличимо от поломки.
-            status.config(
-                text="РУКУ НЕ ВИЖУ — цели не обновляются, робот стоит. "
-                     "Смотрите строку распознавания ниже.",
-                foreground="#e05252")
+            # Причин у молчания несколько, и лечатся они по-разному.
+            # Показать «не вижу руку», когда скелет на экране нарисован, —
+            # значит заставить искать не там.
+            counts = source.funnel.counts
+            if counts["кадров"] == 0:
+                reason = "кадры с камеры не идут"
+            elif counts["поза найдена"] == 0:
+                reason = ("камера видит, но позу не находит — модель не "
+                          "распознаёт человека под этим ракурсом")
+            elif counts["точки видны"] == 0:
+                reason = f"поза есть, но сустав скрыт: {source.funnel.last_loss}"
+            elif counts["фильтр принял"] == 0:
+                reason = ("точки есть, но фильтр отбрасывает всё как рывки — "
+                          "ослабьте: --max-len-change 0.5 --max-jump 90")
+            else:
+                accepted = arm_filter.accepted
+                rejected = arm_filter.rejected
+                total = accepted + rejected
+                share = rejected / total * 100 if total else 0
+                reason = (f"распознавание срывается: отброшено {share:.0f}% "
+                          f"кадров, последний за {time.monotonic() - state['last_target_ms']:.0f} с")
+            status.config(text=f"РОБОТ СТОИТ: {reason}", foreground="#e05252")
         elif relaxed["value"]:
             status.config(text="МОМЕНТ СНЯТ — оси свободны, положение "
                                "обновляется", foreground="#ffb648")
@@ -1498,9 +1537,9 @@ def main() -> int:
     p.add_argument("--diag-seconds", type=float, default=12.0)
     p.add_argument("--min-visibility", type=float, default=0.5,
                    help="порог видимости сустава, ниже — кадр отбрасывается")
-    p.add_argument("--max-len-change", type=float, default=0.25,
+    p.add_argument("--max-len-change", type=float, default=0.45,
                    help="допустимый скачок длины звена за кадр")
-    p.add_argument("--max-jump", type=float, default=45.0,
+    p.add_argument("--max-jump", type=float, default=80.0,
                    help="допустимый скачок угла за кадр, градусы")
     p.add_argument("--limit-margin", type=float, default=3.0,
                    help="допустимый перелёт за предел, градусов вала")
