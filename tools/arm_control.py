@@ -1092,6 +1092,11 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
         # разница выходит в пятнадцать раз, и ось с грубым допуском
         # перестаёт замечать мелкие движения руки.
         tolerance_deg=axis_tolerance(args, axis),
+        # Шаг скорости считается из времени разгона, а не задаётся числом
+        # об/мин: у осей разные потолки (150 и 10), и одна и та же добавка
+        # означала бы у них совершенно разную плавность.
+        max_rpm_step=max(0.5, (args.max_rpm or axis.max_motor_rpm)
+                         * args.period / max(args.ramp, 0.05)),
         period_s=args.period,
         circular=False,          # ход ограничен, витки различать обязательно
         min_motor_deg=low,
@@ -1589,6 +1594,8 @@ def main() -> int:
                    help="общий потолок об/мин; 0 — считать по каждой оси")
     p.add_argument("--kp", type=float, default=0.6,
                    help="об/мин на градус ошибки; больше — плотнее слежение")
+    p.add_argument("--ramp", type=float, default=0.8,
+                   help="секунд до полной скорости; больше — плавнее")
     p.add_argument("--tolerance", type=float, default=1.0,
                    help="допуск в градусах СУСТАВА, одинаковый для всех осей")
     p.add_argument("--period", type=float, default=0.12)
@@ -1716,8 +1723,10 @@ def main() -> int:
         tol = axis_tolerance(args, axis)
         raised = "  (поднят: ниже ось рыскала бы)" if (
             tol > args.tolerance * abs(axis.gear_ratio) + 1e-6) else ""
+        cfg = axis_config(args, axis)
         print(f"  допуск {axis.name}: "
-              f"{abs(axis.motor_to_joint(tol)):.2f}° сустава{raised}")
+              f"{abs(axis.motor_to_joint(tol)):.2f}° сустава{raised}"
+              f",  разгон {cfg.max_rpm_step:.1f} об/мин за проход")
     print()
     print("защита: цель прижимается к пределам; ось за пределом сама")
     print("        возвращается в зону; движение не в ту сторону гасит")

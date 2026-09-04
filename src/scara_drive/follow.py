@@ -105,6 +105,15 @@ class FollowConfig:
     feedforward: bool = True
     feedforward_smoothing: float = 0.4   # скорость цели шумная, её сглаживаем
 
+    #: Насколько об/мин может измениться за один проход контура.
+    #:
+    #: Без этого команда скорости прыгает с нуля до потолка мгновенно.
+    #: Привод отрабатывает такой скачок рывком, а рывок на повышающей
+    #: передаче — прямой путь к сорванному ремню. Ограничение делает
+    #: разгон и торможение плавными, ничего не отнимая у точности:
+    #: у цели ось всё равно оказывается, просто без удара.
+    max_rpm_step: float = 4.0
+
     period_s: float = 0.08            # период прохода контура
 
     #: Сколько проходов подряд может сорваться, прежде чем контур сдастся.
@@ -168,6 +177,7 @@ class AngleFollower:
         self._lock = threading.Lock()
         self._smoothed_deg: float | None = None
         self._target_rate_deg_s = 0.0
+        self._commanded_rpm = 0.0         # что скомандовано сейчас, со знаком
         self._worse_passes = 0            # подряд проходов с растущей ошибкой
         self._last_abs_error: float | None = None
         self._out_passes = 0              # подряд проходов с растущим выходом
@@ -281,6 +291,7 @@ class AngleFollower:
             self._target_deg = actual
         self._smoothed_deg = actual
         self._target_rate_deg_s = 0.0
+        self._commanded_rpm = 0.0
         self._last_target_deg = None
         self._last_target_time = None
         self.reset_direction()
@@ -303,8 +314,13 @@ class AngleFollower:
         self._last_direction = self._one_pass(getattr(self, "_last_direction", None))
 
     def reset_direction(self) -> None:
-        """Забыть текущее направление: следующий реверс пойдёт через HOLD."""
+        """Забыть направление и накопленную скорость.
+
+        Следующий реверс пойдёт через удержание, а разгон начнётся с нуля,
+        а не с той скорости, на которой ось шла до сброса.
+        """
         self._last_direction = None
+        self._commanded_rpm = 0.0
 
     def _one_pass(self, last_direction: str | None) -> str | None:
         cfg = self.config
@@ -396,6 +412,7 @@ class AngleFollower:
                          and abs(self._target_rate_deg_s) >= cfg.min_rpm * 6.0)
         if abs(error) <= cfg.tolerance_deg and not target_moving:
             self.drive.hold()
+            self._commanded_rpm = 0.0
             self.telemetry = Telemetry(
                 target_deg=target, actual_deg=actual, error_deg=error,
                 command_rpm=0, holding=True, raw_counts=raw,
@@ -410,9 +427,21 @@ class AngleFollower:
         if abs(demand) < 1e-9:
             demand = math.copysign(cfg.min_rpm, error)
 
-        rpm = min(cfg.max_rpm, max(cfg.min_rpm, abs(demand)))
+        # Ограничение ускорения: скорость меняется постепенно, а не скачком.
+        # Считаем в знаковых об/мин, чтобы через ноль проходить плавно.
+        wanted = max(-cfg.max_rpm, min(cfg.max_rpm, demand))
+        step = cfg.max_rpm_step
+        self._commanded_rpm += max(-step, min(wanted - self._commanded_rpm, step))
+
+        signed = self._commanded_rpm
+        if abs(signed) < cfg.min_rpm:
+            # Ниже минимума привод не умеет; тянемся к цели минимальной
+            # скоростью в сторону ошибки, а не застываем.
+            signed = math.copysign(cfg.min_rpm, demand if demand else 1.0)
+
+        rpm = min(cfg.max_rpm, max(cfg.min_rpm, abs(signed)))
         rpm_int = max(cfg.min_rpm, int(round(rpm)))
-        direction = "forward" if demand > 0 else "reverse"
+        direction = "forward" if signed > 0 else "reverse"
 
         if last_direction is not None and direction != last_direction:
             self.drive.hold()
@@ -610,6 +639,7 @@ class MultiAxisFollower:
             self._target_deg = actual
         self._smoothed_deg = actual
         self._target_rate_deg_s = 0.0
+        self._commanded_rpm = 0.0
         self._last_target_deg = None
         self._last_target_time = None
         self.reset_direction()
