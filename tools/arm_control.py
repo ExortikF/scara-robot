@@ -43,7 +43,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -95,104 +95,161 @@ POSE_POINTS = {
 
 @dataclass
 class ArmAxis:
-    """Ось робота и её связь с суставом человека.
+    """Ось робота: связь с суставом человека и механика привода.
 
-    ``min_deg`` и ``max_deg`` — **механические пределы оси робота**
-    относительно её нуля, а не диапазон движения человека. ``null`` в любом из
-    них снимает ограничение с этой стороны: ось будет повторять руку сколько
-    угодно, доезжая по кратчайшей дуге.
+    ═══ ПЕРЕДАТОЧНОЕ ЧИСЛО ═══
 
-    Границы раздельные, потому что суставы несимметричны. Локоть человека
-    гнётся в одну сторону, и симметричный предел для него бессмыслен: половина
-    хода не нужна, а нужной половины не хватает.
+    ``gear_ratio`` — сколько оборотов делает ВАЛ МОТОРА на один оборот
+    СУСТАВА. Редуктор 1:10 — это ``gear_ratio = 10``: мотор крутится
+    вдесятеро быстрее сустава, а момента даёт вдесятеро больше.
+
+    Если передача повышающая (большой шкив ведёт малый, сустав крутится
+    быстрее мотора), число меньше единицы: ремень «полтора наоборот» —
+    это ``gear_ratio = 1 / 1.5 = 0.667``.
+
+    Отсюда пересчёт, который иначе легко перепутать:
+
+        градусы вала = градусы сустава * gear_ratio
+
+    ``reverse`` — переворачивает ли передача направление. Зубчатая пара
+    переворачивает, ремень между шкивами — нет.
+
+    ═══ ПРЕДЕЛЫ ═══
+
+    ``min_deg`` и ``max_deg`` задаются в градусах СУСТАВА и отсчитываются
+    от середины, выставленной калибровкой. По умолчанию ±90°.
     """
 
     name: str
     device_id: int
-    joint: str            # "q1" — плечо, "q2" — локоть
-    min_deg: float | None = None      # None — предела нет
-    max_deg: float | None = None
-    gain: float = 1.0     # во сколько раз повторять движение человека
-    invert: bool = False
+    joint: str                    # "q1" — плечо, "q2" — локоть
+    gear_ratio: float = 1.0       # оборотов вала на оборот сустава
+    reverse: bool = False         # передача переворачивает направление
+    min_deg: float = -90.0        # предел сустава от середины
+    max_deg: float = 90.0
+    gain: float = 1.0             # во сколько раз повторять движение руки
+    max_joint_deg_s: float = 60.0 # потолок скорости сустава
 
     def __post_init__(self) -> None:
-        if (self.min_deg is not None and self.max_deg is not None
-                and self.min_deg >= self.max_deg):
+        if self.gear_ratio <= 0:
+            raise ValueError(f"{self.name}: gear_ratio должен быть больше нуля")
+        if self.min_deg >= self.max_deg:
             raise ValueError(f"{self.name}: min_deg должен быть меньше max_deg")
 
+    # --- сустав <-> вал ---------------------------------------------------
+
+    def joint_to_motor(self, joint_deg: float) -> float:
+        value = joint_deg * self.gear_ratio
+        return -value if self.reverse else value
+
+    def motor_to_joint(self, motor_deg: float) -> float:
+        value = motor_deg / self.gear_ratio
+        return -value if self.reverse else value
+
+    # --- цель -------------------------------------------------------------
+
+    def joint_target(self, human_deg: float) -> float:
+        """Угол сустава человека -> угол сустава робота, с учётом пределов."""
+        return max(self.min_deg, min(human_deg * self.gain, self.max_deg))
+
+    def motor_target(self, human_deg: float) -> float:
+        """То же, но сразу в градусах вала — это и уходит в контур."""
+        return self.joint_to_motor(self.joint_target(human_deg))
+
+    def is_clamped(self, human_deg: float) -> bool:
+        value = human_deg * self.gain
+        return not (self.min_deg < value < self.max_deg)
+
     @property
-    def unlimited(self) -> bool:
-        return self.min_deg is None and self.max_deg is None
-
-    def _scaled(self, joint_deg: float) -> float:
-        value = joint_deg * self.gain
-        return -value if self.invert else value
-
-    def target_deg(self, joint_deg: float) -> float:
-        """Угол сустава человека -> смещение оси от её нуля."""
-        value = self._scaled(joint_deg)
-        if self.min_deg is not None:
-            value = max(self.min_deg, value)
-        if self.max_deg is not None:
-            value = min(self.max_deg, value)
-        return value
-
-    def is_clamped(self, joint_deg: float) -> bool:
-        """Упёрлись ли в предел. Нужно, чтобы показать это в окне.
-
-        Без такого признака «ось перестала следовать за мной» выглядит
-        поломкой, хотя это штатное срабатывание ограничителя.
-        """
-        value = self._scaled(joint_deg)
-        return ((self.min_deg is not None and value <= self.min_deg)
-                or (self.max_deg is not None and value >= self.max_deg))
+    def max_motor_rpm(self) -> int:
+        """Потолок оборотов вала под заданную скорость сустава."""
+        return max(1, round(self.max_joint_deg_s * self.gear_ratio / 6.0))
 
     def limits_text(self) -> str:
-        if self.unlimited:
-            return "без предела"
-        low = "—" if self.min_deg is None else f"{self.min_deg:+.0f}"
-        high = "—" if self.max_deg is None else f"{self.max_deg:+.0f}"
-        return f"{low}..{high}°"
+        return f"{self.min_deg:+.0f}..{self.max_deg:+.0f}°"
+
+    def gear_text(self) -> str:
+        if self.gear_ratio >= 1:
+            base = f"редуктор 1:{self.gear_ratio:g}"
+        else:
+            base = f"повышающая {1 / self.gear_ratio:g}:1"
+        return base + (", реверс" if self.reverse else "")
 
 
 DEFAULT_AXES = [
-    # По умолчанию пределов нет: ось повторяет руку один в один, звенья на
-    # схеме совпадают. Если у вашей механики есть упоры — впишите их в
-    # arm_axes.json, программа за них не выйдет.
-    ArmAxis("J1 плечо",  1, "q1"),
-    ArmAxis("J2 локоть", 2, "q2"),
+    # J1: редуктор с передаточным 10.
+    #     ±90° сустава — это ±900° вала, два с половиной оборота в каждую
+    #     сторону. Ради этого контур и переведён в многооборотный режим.
+    ArmAxis("J1 плечо", 1, "q1", gear_ratio=10.0),
+
+    # J2: ремень ГРМ. ВНИМАНИЕ: значение под вопросом, см. README рядом.
+    #     1.5 — если ремень понижающий (сустав медленнее вала).
+    #     0.667 — если повышающий (большой шкив ведёт малый).
+    ArmAxis("J2 локоть", 2, "q2", gear_ratio=1.5),
 ]
 
 
 def load_axes() -> list[ArmAxis]:
+    """Прочитать описание осей, переварив файлы от прежних версий.
+
+    Описание менялось по мере того, как собиралась машина: сначала был
+    симметричный span_deg, потом пара пределов, теперь ещё и передачи.
+    Ронять запуск из-за старого файла нельзя — приводим что есть к
+    текущему виду и говорим, что поменяли.
+    """
     if not AXES_FILE.is_file():
-        AXES_FILE.write_text(
-            json.dumps([asdict(a) for a in DEFAULT_AXES], ensure_ascii=False,
-                       indent=2), encoding="utf-8")
-        log.info("создан %s — пределы осей правьте там", AXES_FILE.name)
+        save_axes(DEFAULT_AXES)
+        log.info("создан %s — проверьте передачи и пределы", AXES_FILE.name)
         return DEFAULT_AXES
-    axes = []
-    migrated = False
+
+    known = {f.name for f in fields(ArmAxis)}
+    defaults = {a.name: a for a in DEFAULT_AXES}
+    axes, changed = [], False
+
     for item in json.loads(AXES_FILE.read_text(encoding="utf-8")):
-        # Старые файлы описывали ход одним симметричным span_deg. Молча
-        # уронить их нельзя, поэтому переводим в пару границ.
+        item = dict(item)
+
+        # Симметричный ход из самой первой версии.
         if "span_deg" in item:
             half = item.pop("span_deg") / 2
             item.setdefault("min_deg", -half)
             item.setdefault("max_deg", half)
-            migrated = True
-            log.warning("%s: span_deg=%g переведён в пределы %+g..%+g — "
-                        "проверьте их в %s", item["name"], half * 2,
-                        -half, half, AXES_FILE.name)
+            changed = True
+
+        # «Без предела» из версии до установки редукторов: с механикой на
+        # месте безграничный ход опасен, возвращаем ±90°.
+        for side, fallback in (("min_deg", -90.0), ("max_deg", 90.0)):
+            if item.get(side) is None:
+                item[side] = fallback
+                changed = True
+
+        dropped = set(item) - known
+        for key in dropped:
+            item.pop(key)
+        if dropped:
+            changed = True
+
+        # Передачи в старых файлах не описаны — берём из умолчаний по имени.
+        if "gear_ratio" not in item:
+            sample = defaults.get(item.get("name"))
+            if sample is not None:
+                item["gear_ratio"] = sample.gear_ratio
+                item["reverse"] = sample.reverse
+                changed = True
+
         axes.append(ArmAxis(**item))
 
-    if migrated:
-        AXES_FILE.write_text(
-            json.dumps([asdict(a) for a in axes], ensure_ascii=False, indent=2),
-            encoding="utf-8")
-        log.warning("%s переписан в новый формат — проверьте пределы",
-                    AXES_FILE.name)
+    if changed:
+        save_axes(axes)
+        log.warning("%s обновлён под новую механику — ПРОВЕРЬТЕ передачи "
+                    "и пределы", AXES_FILE.name)
     return axes
+
+
+def save_axes(axes: list[ArmAxis]) -> None:
+    AXES_FILE.write_text(
+        json.dumps([asdict(a) for a in axes], ensure_ascii=False, indent=2),
+        encoding="utf-8")
 
 
 class SimulatedAxis:
@@ -654,19 +711,41 @@ def preflight_line(transport: SerialConfig) -> None:
     )
 
 
-def build_followers(args, axes):
-    config = FollowConfig(
-        counts_per_rev=args.cpr, invert_encoder=not args.no_invert,
-        kp=args.kp, max_rpm=args.max_rpm, tolerance_deg=args.tolerance,
-        period_s=args.period,
-    )
-    warning = config.check_tolerance()
-    if warning:
-        log.warning(warning)
+CALIBRATION_FILE = Path(__file__).with_name("arm_calibration.json")
 
+
+def load_calibration() -> dict:
+    """Сохранённые нули осей в импульсах энкодера.
+
+    Энкодер абсолютный и многооборотный: он помнит положение вала и после
+    выключения питания. Поэтому середину достаточно выставить один раз, а
+    дальше она восстанавливается при каждом запуске — не нужно каждый раз
+    руками ставить руку в среднее положение.
+    """
+    if not CALIBRATION_FILE.is_file():
+        return {}
+    try:
+        return json.loads(CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        log.warning("не читается %s: %s — калибровка сброшена",
+                    CALIBRATION_FILE.name, exc)
+        return {}
+
+
+def save_calibration(data: dict) -> None:
+    CALIBRATION_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def build_followers(args, axes):
+    """Собрать контуры по осям. У каждой оси свой предел оборотов."""
     if args.simulate:
-        return ({a.name: AngleFollower(SimulatedAxis(args.cpr, not args.no_invert),
-                                       config) for a in axes}, None)
+        followers = {}
+        for axis in axes:
+            followers[axis.name] = AngleFollower(
+                SimulatedAxis(args.cpr, not args.no_invert),
+                axis_config(args, axis))
+        return followers, None
 
     if args.host:
         transport = TcpConfig(host=args.host, port=args.tcp_port)
@@ -682,8 +761,33 @@ def build_followers(args, axes):
     bus = DriveBus(transport)
     bus.connect()
     log.info("шина: %s", bus.where)
-    return ({a.name: AngleFollower(bus.axis(a.device_id), config) for a in axes},
-            bus)
+    followers = {axis.name: AngleFollower(bus.axis(axis.device_id),
+                                          axis_config(args, axis))
+                 for axis in axes}
+    return followers, bus
+
+
+def axis_config(args, axis: ArmAxis) -> FollowConfig:
+    """Настройки контура под конкретную ось.
+
+    Потолок оборотов свой у каждой оси: при редукторе 10 сустав на 30°/с
+    требует от вала 300°/с, то есть 50 об/мин. Общий предел для всех осей
+    означал бы, что либо тихоходная ось перекручивается, либо быстрая не
+    успевает за рукой.
+    """
+    config = FollowConfig(
+        counts_per_rev=args.cpr,
+        invert_encoder=not args.no_invert,
+        kp=args.kp,
+        max_rpm=args.max_rpm or axis.max_motor_rpm,
+        tolerance_deg=args.tolerance,
+        period_s=args.period,
+        circular=False,          # ход ограничен, витки различать обязательно
+    )
+    warning = config.check_tolerance()
+    if warning:
+        log.warning("%s: %s", axis.name, warning)
+    return config
 
 
 def run_gui(loop, source, axes, arm_filter, args):
@@ -749,7 +853,7 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     def toggle_pause():
         if not zeroed["value"]:
-            status.config(text="сначала «ноль здесь»: без калибровки цель "
+            status.config(text="сначала выставьте середину: без неё цель "
                                "считается от произвольного угла",
                           foreground="#ffb648")
             return
@@ -763,25 +867,53 @@ def run_gui(loop, source, axes, arm_filter, args):
         status.config(text="ОСТАНОВЛЕНО кнопкой. Перезапустите приложение.",
                       foreground="#e05252")
 
-    def set_zero():
+    def set_middle():
+        """Принять текущее положение и руки, и осей за середину."""
         current = arm_filter.last
         if current is None:
-            status.config(text="руку не вижу — нечего принимать за ноль",
+            status.config(text="руку не вижу — нечего принимать за середину",
                           foreground="#ffb648")
             return
         zero["q1"], zero["q2"] = current
         loop.set_zero_here()
         zeroed["value"] = True
-        status.config(text=f"ноль принят: плечо {zero['q1']:.0f}°, "
-                           f"локоть {zero['q2']:.0f}°. Можно снимать паузу.",
-                      foreground="")
+
+        saved = {name: follower.zero_offset_counts
+                 for name, follower in loop.followers.items()}
+        save_calibration(saved)
+
+        status.config(text=f"середина выставлена: плечо {zero['q1']:.0f}°, "
+                           f"локоть {zero['q2']:.0f}°. Сохранено, "
+                           f"можно снимать паузу.", foreground="")
+
+    def use_saved():
+        """Взять середину осей из файла, а позу руки — текущую."""
+        current = arm_filter.last
+        if current is None:
+            status.config(text="руку не вижу — покажите её в кадре",
+                          foreground="#ffb648")
+            return
+        saved = load_calibration()
+        missing = [n for n in loop.followers if n not in saved]
+        if missing:
+            status.config(text=f"нет сохранённой середины для: "
+                               f"{', '.join(missing)}", foreground="#ffb648")
+            return
+        for name, follower in loop.followers.items():
+            follower.zero_offset_counts = int(saved[name])
+        zero["q1"], zero["q2"] = current
+        zeroed["value"] = True
+        status.config(text="середина осей взята из файла, поза руки — "
+                           "текущая. Можно снимать паузу.", foreground="")
 
     pause_button = ttk.Button(buttons, text="ПРОДОЛЖИТЬ", command=toggle_pause)
     pause_button.grid(row=0, column=0, padx=6)
     ttk.Button(buttons, text="СТОП", command=emergency_stop).grid(
         row=0, column=1, padx=6)
-    ttk.Button(buttons, text="ноль здесь", command=set_zero).grid(
+    ttk.Button(buttons, text="СЕРЕДИНА ЗДЕСЬ", command=set_middle).grid(
         row=0, column=2, padx=6)
+    ttk.Button(buttons, text="взять сохранённую", command=use_saved).grid(
+        row=0, column=3, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1}
     zeroed = {"value": False}
@@ -793,7 +925,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         relative = (wrap180(smoothed[0] - zero["q1"]),
                     wrap180(smoothed[1] - zero["q2"]))
         loop.set_targets({
-            axis.name: axis.target_deg(
+            axis.name: axis.motor_target(
                 relative[0] if axis.joint == "q1" else relative[1])
             for axis in axes
         })
@@ -834,9 +966,11 @@ def run_gui(loop, source, axes, arm_filter, args):
         for axis in axes:
             telemetry = loop.followers[axis.name].telemetry
             labels = rows[axis.name]
-            labels[3].config(text=f"{telemetry.target_deg:7.1f}°")
-            labels[4].config(text=f"{telemetry.actual_deg:7.1f}°")
-            labels[5].config(text=f"{telemetry.error_deg:+7.1f}°")
+            # Показываем сустав, а не вал: за валом стоит редуктор, и его
+            # градусы человеку ни о чём не говорят.
+            labels[3].config(text=f"{axis.motor_to_joint(telemetry.target_deg):7.1f}°")
+            labels[4].config(text=f"{axis.motor_to_joint(telemetry.actual_deg):7.1f}°")
+            labels[5].config(text=f"{axis.motor_to_joint(telemetry.error_deg):+7.1f}°")
             labels[6].config(text=f"{telemetry.command_rpm:+3d}")
             labels[7].config(text="удержание" if telemetry.holding else "едет")
 
@@ -849,7 +983,7 @@ def run_gui(loop, source, axes, arm_filter, args):
                 text=(f"УПЁРЛАСЬ  {axis.limits_text()}" if clamped
                       else axis.limits_text()),
                 foreground="#ffb648" if clamped else "")
-            commanded.append(wrap180(telemetry.actual_deg))
+            commanded.append(axis.motor_to_joint(telemetry.actual_deg))
 
         robot_view.update(commanded[0], commanded[1], human_joints)
 
@@ -859,7 +993,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         elif loop.warning_text:
             status.config(text=loop.warning_text, foreground="#ffb648")
         elif not zeroed["value"]:
-            status.config(text="сначала нажмите «ноль здесь» — без этого "
+            status.config(text="сначала «СЕРЕДИНА ЗДЕСЬ» — без неё "
                                "приводы не поедут", foreground="#ffb648")
         elif paused["value"]:
             status.config(text="ПАУЗА — приводы не двигаются", foreground="#ffb648")
@@ -985,7 +1119,8 @@ def main() -> int:
 
     p.add_argument("--cpr", type=int, default=131072)
     p.add_argument("--no-invert", action="store_true")
-    p.add_argument("--max-rpm", type=int, default=25)
+    p.add_argument("--max-rpm", type=int, default=0,
+                   help="общий потолок об/мин; 0 — считать по каждой оси")
     p.add_argument("--kp", type=float, default=0.6,
                    help="об/мин на градус ошибки; больше — плотнее слежение")
     p.add_argument("--tolerance", type=float, default=1.5)
@@ -1046,8 +1181,10 @@ def main() -> int:
     print("оси:")
     for axis in axes:
         joint = "плечо" if axis.joint == "q1" else "локоть"
-        print(f"  id={axis.device_id}  {axis.name:<10} <- {joint}, "
-              f"{axis.limits_text()}, усиление {axis.gain:g}")
+        print(f"  id={axis.device_id}  {axis.name:<11} <- {joint:<7} "
+              f"{axis.gear_text():<22} сустав {axis.limits_text()}")
+        print(f"           {'':<11}    это {axis.joint_to_motor(axis.max_deg):+.0f}° "
+              f"вала, потолок {axis.max_motor_rpm} об/мин")
     print()
 
     followers, bus = build_followers(args, axes)

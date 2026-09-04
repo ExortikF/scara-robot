@@ -54,6 +54,16 @@ class FollowConfig:
     counts_per_rev: int = 131072      # 17-битный энкодер
     invert_encoder: bool = True       # команда «вперёд» уменьшает счёт
 
+    #: Круговая ось или ось с ограниченным ходом.
+    #:
+    #: True  — угол сводится к 0..360, ошибка по кратчайшей дуге. Годится
+    #:         для оси, которая крутится свободно.
+    #: False — угол разворачивается многооборотно, ошибка считается прямой
+    #:         разностью. Обязательно там, где стоит редуктор: сустав на
+    #:         ±90° при передаточном 10 требует ±900° на валу мотора, и
+    #:         сведение по модулю оборота потеряло бы, на каком витке ось.
+    circular: bool = True
+
     kp: float = 0.225                 # об/мин на градус ошибки
     min_rpm: int = 1                  # привод принимает целые об/мин
     max_rpm: int = 20
@@ -144,7 +154,8 @@ class AngleFollower:
     def set_target(self, degrees: float) -> None:
         """Поставить новую цель. Вызывается из потока источника."""
         with self._lock:
-            self._target_deg = normalize_360(degrees)
+            self._target_deg = (normalize_360(degrees) if self.config.circular
+                                else float(degrees))
 
     def _take_target(self) -> float:
         with self._lock:
@@ -155,11 +166,12 @@ class AngleFollower:
         if self._smoothed_deg is None:
             self._smoothed_deg = raw
         else:
-            delta = shortest_angle_error(raw, self._smoothed_deg)
+            delta = self.angle_error(raw, self._smoothed_deg)
             if abs(delta) > self.config.deadband_deg:
-                self._smoothed_deg = normalize_360(
-                    self._smoothed_deg + delta * self.config.smoothing
-                )
+                moved = delta * self.config.smoothing
+                self._smoothed_deg = (
+                    normalize_360(self._smoothed_deg + moved)
+                    if self.config.circular else self._smoothed_deg + moved)
 
         self._update_target_rate(self._smoothed_deg)
         return self._smoothed_deg
@@ -170,7 +182,7 @@ class AngleFollower:
         if self._last_target_time is not None and self._last_target_deg is not None:
             dt = now - self._last_target_time
             if dt > 0:
-                moved = shortest_angle_error(target_deg, self._last_target_deg)
+                moved = self.angle_error(target_deg, self._last_target_deg)
                 rate = moved / dt
                 alpha = self.config.feedforward_smoothing
                 self._target_rate_deg_s += (rate - self._target_rate_deg_s) * alpha
@@ -180,11 +192,26 @@ class AngleFollower:
     # --- положение --------------------------------------------------------
 
     def counts_to_degrees(self, raw: int) -> float:
+        """Импульсы энкодера -> градусы вала, от программного нуля.
+
+        В круговом режиме результат лежит в 0..360. В многооборотном
+        разворачивается без ограничений: три оборота назад дают -1080°.
+        """
         delta = raw - self.zero_offset_counts
         if self.config.invert_encoder:
             delta = -delta
+        if not self.config.circular:
+            return delta * 360.0 / self.config.counts_per_rev
         return normalize_360(delta % self.config.counts_per_rev
                              * 360.0 / self.config.counts_per_rev)
+
+    def angle_error(self, target_deg: float, actual_deg: float) -> float:
+        """Ошибка с учётом режима оси."""
+        if self.config.circular:
+            return shortest_angle_error(target_deg, actual_deg)
+        # У оси с ограниченным ходом дороги «через ноль» нет: кратчайшая
+        # дуга там не короткий путь, а прыжок через всю рабочую зону.
+        return target_deg - actual_deg
 
     def set_zero_here(self) -> None:
         """Принять текущее положение за 0°."""
@@ -212,7 +239,7 @@ class AngleFollower:
         raw = self.drive.read_position()
         actual = self.counts_to_degrees(raw)
         target = self._take_target()
-        error = shortest_angle_error(target, actual)
+        error = self.angle_error(target, actual)
 
         # Встаём на удержание, только если цель ещё и стоит. Иначе при
         # медленном движении руки ось внутри зоны допуска отпускает привод,

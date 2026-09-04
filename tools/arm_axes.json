@@ -3,18 +3,22 @@
     "name": "J1 плечо",
     "device_id": 1,
     "joint": "q1",
-    "min_deg": null,
-    "max_deg": null,
+    "gear_ratio": 10.0,
+    "reverse": false,
+    "min_deg": -90.0,
+    "max_deg": 90.0,
     "gain": 1.0,
-    "invert": false
+    "max_joint_deg_s": 60.0
   },
   {
     "name": "J2 локоть",
     "device_id": 2,
     "joint": "q2",
-    "min_deg": null,
-    "max_deg": null,
+    "gear_ratio": 1.5,
+    "reverse": false,
+    "min_deg": -90.0,
+    "max_deg": 90.0,
     "gain": 1.0,
-    "invert": false
+    "max_joint_deg_s": 60.0
   }
 ]
