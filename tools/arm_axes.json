@@ -14,7 +14,7 @@
     "name": "J2 локоть",
     "device_id": 2,
     "joint": "q2",
-    "gear_ratio": 1.5,
+    "gear_ratio": 0.6666666666666666,
     "reverse": false,
     "min_deg": -90.0,
     "max_deg": 90.0,
