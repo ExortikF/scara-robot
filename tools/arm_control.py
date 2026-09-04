@@ -274,6 +274,7 @@ class SimulatedAxis:
     def enable(self): pass
     def hold(self): self._advance(); self.rpm = 0.0
     def stop(self): self.hold()
+    def release(self): self.hold()
 
     def run(self, speed, *, reverse=False):
         time.sleep(0.006); self._advance()
@@ -866,6 +867,10 @@ def run_gui(loop, source, axes, arm_filter, args):
     buttons.pack(pady=(0, 14))
 
     def toggle_pause():
+        if relaxed["value"]:
+            status.config(text="сначала «ЗАЖАТЬ» — со снятым моментом "
+                               "приводы не поедут", foreground="#ffb648")
+            return
         if not zeroed["value"]:
             status.config(text="сначала выставьте середину: без неё цель "
                                "считается от произвольного угла",
@@ -873,6 +878,10 @@ def run_gui(loop, source, axes, arm_filter, args):
             return
         paused["value"] = not paused["value"]
         pause_button.config(text="ПРОДОЛЖИТЬ" if paused["value"] else "ПАУЗА")
+        if paused["value"]:
+            # Пауза обязана именно останавливать. Замораживать цель мало:
+            # старая цель осталась бы в силе, и ось продолжила бы ехать.
+            loop.freeze()
 
     def emergency_stop():
         paused["value"] = True
@@ -880,6 +889,25 @@ def run_gui(loop, source, axes, arm_filter, args):
         pause_button.config(text="ПРОДОЛЖИТЬ")
         status.config(text="ОСТАНОВЛЕНО кнопкой. Перезапустите приложение.",
                       foreground="#e05252")
+
+    def toggle_relax():
+        """Снять момент, чтобы двигать руку робота вручную, и вернуть обратно."""
+        relaxed["value"] = not relaxed["value"]
+        loop.set_relaxed(relaxed["value"])
+        relax_button.config(text="ЗАЖАТЬ" if relaxed["value"] else "РАССЛАБИТЬ")
+
+        if relaxed["value"]:
+            # Пауза обязана включиться: иначе при возврате момента ось
+            # поедет к цели, которую источник наставил, пока руку двигали.
+            paused["value"] = True
+            pause_button.config(text="ПРОДОЛЖИТЬ")
+            status.config(text="МОМЕНТ СНЯТ — двигайте руку робота руками. "
+                               "Положение в таблице обновляется.",
+                          foreground="#ffb648")
+        else:
+            status.config(text="момент возвращён. Выставьте середину заново, "
+                               "если сдвигали оси, и снимайте паузу.",
+                          foreground="")
 
     def set_middle():
         """Принять текущее положение и руки, и осей за середину."""
@@ -928,9 +956,12 @@ def run_gui(loop, source, axes, arm_filter, args):
         row=0, column=2, padx=6)
     ttk.Button(buttons, text="взять сохранённую", command=use_saved).grid(
         row=0, column=3, padx=6)
+    relax_button = ttk.Button(buttons, text="РАССЛАБИТЬ", command=toggle_relax)
+    relax_button.grid(row=0, column=4, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1}
     zeroed = {"value": False}
+    relaxed = {"value": False}
 
     def on_target(smoothed):
         """Вызывается из потока распознавания."""
@@ -986,7 +1017,8 @@ def run_gui(loop, source, axes, arm_filter, args):
             labels[4].config(text=f"{axis.motor_to_joint(telemetry.actual_deg):7.1f}°")
             labels[5].config(text=f"{axis.motor_to_joint(telemetry.error_deg):+7.1f}°")
             labels[6].config(text=f"{telemetry.command_rpm:+3d}")
-            labels[7].config(text="удержание" if telemetry.holding else "едет")
+            labels[7].config(text="расслаблена" if relaxed["value"]
+                             else ("удержание" if telemetry.holding else "едет"))
 
             clamped = False
             if human_joints is not None:
@@ -1010,6 +1042,9 @@ def run_gui(loop, source, axes, arm_filter, args):
         elif not zeroed["value"]:
             status.config(text="сначала «СЕРЕДИНА ЗДЕСЬ» — без неё "
                                "приводы не поедут", foreground="#ffb648")
+        elif relaxed["value"]:
+            status.config(text="МОМЕНТ СНЯТ — оси свободны, положение "
+                               "обновляется", foreground="#ffb648")
         elif paused["value"]:
             status.config(text="ПАУЗА — приводы не двигаются", foreground="#ffb648")
         else:
@@ -1028,6 +1063,10 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     def shutdown():
         worker.stop()
+        try:
+            loop.set_relaxed(True)      # не оставляем оси под током
+        except Exception:
+            log.exception("не удалось снять момент при выходе")
         loop.stop()
         source.close()
         root.destroy()

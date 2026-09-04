@@ -171,6 +171,7 @@ class AngleFollower:
         self._worse_passes = 0            # подряд проходов с растущей ошибкой
         self._last_abs_error: float | None = None
         self.fault: str | None = None     # причина аварийной остановки
+        self.relaxed = False              # момент снят, вал крутится руками
         self._last_target_deg: float | None = None
         self._last_target_time: float | None = None
         self._stop = threading.Event()
@@ -264,6 +265,23 @@ class AngleFollower:
         # дуга там не короткий путь, а прыжок через всю рабочую зону.
         return target_deg - actual_deg
 
+    def hold_here(self) -> None:
+        """Сделать текущее положение целью — ось остаётся где стоит.
+
+        Нужно везде, где движение прекращают, не выключая контур: на паузе
+        и при возврате момента. Просто перестать обновлять цель мало —
+        старая цель никуда не девается, и ось продолжит ехать к ней. После
+        ручного перемещения это означало бы рывок обратно.
+        """
+        actual = self.counts_to_degrees(self.drive.read_position())
+        with self._lock:
+            self._target_deg = actual
+        self._smoothed_deg = actual
+        self._target_rate_deg_s = 0.0
+        self._last_target_deg = None
+        self._last_target_time = None
+        self.reset_direction()
+
     def set_zero_here(self) -> None:
         """Принять текущее положение за 0°."""
         self.zero_offset_counts = self.drive.read_position()
@@ -291,6 +309,18 @@ class AngleFollower:
         actual = self.counts_to_degrees(raw)
         target = self._take_target()
         error = self.angle_error(target, actual)
+
+        # Момент снят: положение читаем и показываем — видно, куда двигают
+        # руку, — но команд не даём. Защита тоже молчит: вал уводят руками,
+        # и трактовать это как аварию было бы неверно.
+        if self.relaxed:
+            self.telemetry = Telemetry(
+                target_deg=target, actual_deg=actual, error_deg=error,
+                command_rpm=0, holding=True, raw_counts=raw,
+                passes=self.telemetry.passes + 1)
+            self._last_abs_error = None
+            self._worse_passes = 0
+            return None
 
         # ── слой 2: фактическое положение вышло за предел ──────────────
         #
@@ -475,9 +505,59 @@ class MultiAxisFollower:
         self.dropped = 0
         self.sweep_ms = 0.0
 
+    def freeze(self) -> None:
+        """Остановить все оси там, где они стоят."""
+        for name, follower in self.followers.items():
+            try:
+                follower.hold_here()
+                follower.drive.hold()
+            except Exception as exc:
+                log.exception("ось %s: не удалось остановить", name)
+                self.warning_text = f"ось {name}: {exc}"
+
+    def set_relaxed(self, relaxed: bool) -> None:
+        """Снять или вернуть момент на всех осях.
+
+        Возврат момента НЕ трогает цель: пока вал крутили руками, он ушёл,
+        и ось рванула бы к прежней цели. Цель обновит источник, а до тех
+        пор вызывающий код обязан держать паузу.
+        """
+        for name, follower in self.followers.items():
+            try:
+                if relaxed:
+                    follower.drive.release()
+                else:
+                    # Вал крутили руками: прежде чем вернуть момент, делаем
+                    # целью текущее положение, иначе ось рванёт к старой.
+                    follower.hold_here()
+                    follower.drive.enable()
+                follower.relaxed = relaxed
+                follower.reset_direction()
+            except Exception as exc:
+                log.exception("ось %s: не удалось %s момент", name,
+                              "снять" if relaxed else "вернуть")
+                self.warning_text = f"ось {name}: {exc}"
+
     def set_targets(self, targets: dict[str, float]) -> None:
         for name, degrees in targets.items():
             self.followers[name].set_target(degrees)
+
+    def hold_here(self) -> None:
+        """Сделать текущее положение целью — ось остаётся где стоит.
+
+        Нужно везде, где движение прекращают, не выключая контур: на паузе
+        и при возврате момента. Просто перестать обновлять цель мало —
+        старая цель никуда не девается, и ось продолжит ехать к ней. После
+        ручного перемещения это означало бы рывок обратно.
+        """
+        actual = self.counts_to_degrees(self.drive.read_position())
+        with self._lock:
+            self._target_deg = actual
+        self._smoothed_deg = actual
+        self._target_rate_deg_s = 0.0
+        self._last_target_deg = None
+        self._last_target_time = None
+        self.reset_direction()
 
     def set_zero_here(self) -> None:
         for follower in self.followers.values():

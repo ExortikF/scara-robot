@@ -293,6 +293,17 @@ class ServoDrive:
         self._write(self.config.cmd_register, reg.CMD_HOLD)
         self._last_command = reg.CMD_HOLD
 
+    def release(self) -> None:
+        """Снять момент: вал можно вращать руками.
+
+        Отличается от :meth:`hold` тем, что там вал остаётся под током и
+        держит позицию, а здесь привод отпускает его совсем.
+        """
+        self._write(self.config.cmd_register, self.config.cmd_stop)
+        self.write_param(reg.P_SERVO_ENABLE, 0)
+        self._last_command = self.config.cmd_stop
+        self._last_speed = None
+
     def run(self, speed: int | None = None, *, reverse: bool = False) -> None:
         """Пуск. ``speed`` задаётся до подачи команды направления.
 
