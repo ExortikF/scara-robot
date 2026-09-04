@@ -185,6 +185,7 @@ class AngleFollower:
         self._last_overshoot: float | None = None
         self.fault: str | None = None     # причина аварийной остановки
         self.relaxed = False              # момент снят, вал крутится руками
+        self.armed = False                # разрешено ли двигаться
         self.out_of_range = 0.0           # на сколько вал за пределом
         self._last_target_deg: float | None = None
         self._last_target_time: float | None = None
@@ -330,16 +331,23 @@ class AngleFollower:
         target = self._take_target()
         error = self.angle_error(target, actual)
 
-        # Момент снят: положение читаем и показываем — видно, куда двигают
-        # руку, — но команд не даём. Защита тоже молчит: вал уводят руками,
-        # и трактовать это как аварию было бы неверно.
-        if self.relaxed:
+        # Пока движение не разрешено, ось только докладывает положение.
+        #
+        # Раньше контур начинал править положение сразу после запуска, и
+        # достаточно было любого расхождения — подтолкнули руку, осел
+        # ремень, сменили ноль — чтобы ось поехала, хотя пуск никто не
+        # нажимал. Движение обязано требовать явного разрешения.
+        if self.relaxed or not self.armed:
             self.telemetry = Telemetry(
                 target_deg=target, actual_deg=actual, error_deg=error,
                 command_rpm=0, holding=True, raw_counts=raw,
                 passes=self.telemetry.passes + 1)
             self._last_abs_error = None
+            self._last_actual = None
             self._worse_passes = 0
+            self._commanded_rpm = 0.0
+            if not self.relaxed:
+                self.drive.hold()      # под током, но без движения
             return None
 
         # ── слой 2: фактическое положение вышло за предел ──────────────
@@ -599,6 +607,7 @@ class MultiAxisFollower:
         self.error_text = None
         self.warning_text = None
         self._fault_axis = None
+        self.set_armed(False)          # после аварии пуск только вручную
 
         if self._thread is None:
             self.freeze()
@@ -617,6 +626,22 @@ class MultiAxisFollower:
                 log.exception("ось %s: не удалось остановить", name)
                 self.warning_text = f"ось {name}: {exc}"
 
+    def set_armed(self, armed: bool) -> None:
+        """Разрешить или запретить движение всем осям.
+
+        Запрет — не то же самое, что снятый момент: ось остаётся под током
+        и держит позицию, просто не пытается никуда ехать.
+        """
+        for follower in self.followers.values():
+            if not armed:
+                follower._commanded_rpm = 0.0
+            follower.armed = armed
+        log.info("движение %s", "разрешено" if armed else "запрещено")
+
+    @property
+    def armed(self) -> bool:
+        return any(f.armed for f in self.followers.values())
+
     def set_relaxed(self, relaxed: bool) -> None:
         """Снять или вернуть момент на всех осях.
 
@@ -624,6 +649,8 @@ class MultiAxisFollower:
         и ось рванула бы к прежней цели. Цель обновит источник, а до тех
         пор вызывающий код обязан держать паузу.
         """
+        if relaxed:
+            self.set_armed(False)
         for name, follower in self.followers.items():
             try:
                 if relaxed:
@@ -690,6 +717,7 @@ class MultiAxisFollower:
                     # Защита сработала. Связь тут ни при чём, повторять
                     # нечего: гасим всё и выходим.
                     self._fault_axis = name
+                    self.set_armed(False)
                     self.error_text = f"ЗАЩИТА, ось {name}: {exc}"
                     log.error(self.error_text)
                     break

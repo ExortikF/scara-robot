@@ -1122,6 +1122,7 @@ def run_test_move(loop, axes, degrees: float, seconds: float) -> int:
 
     print(f"\nпроверка хода: цель ±{degrees:g}° сустава, по {seconds:g} с\n")
     loop.start()
+    loop.set_armed(True)
     try:
         for target in (degrees, -degrees, 0.0):
             print(f"  цель {target:+.0f}° сустава")
@@ -1234,6 +1235,9 @@ def run_gui(loop, source, axes, arm_filter, args):
             return
         paused["value"] = not paused["value"]
         pause_button.config(text="ПРОДОЛЖИТЬ" if paused["value"] else "ПАУЗА")
+        # Движение разрешено ровно тогда, когда снята пауза. Раньше контур
+        # правил положение всегда, и ось могла поехать сама.
+        loop.set_armed(not paused["value"])
         if paused["value"]:
             # Пауза обязана именно останавливать. Замораживать цель мало:
             # старая цель осталась бы в силе, и ось продолжила бы ехать.
@@ -1489,6 +1493,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", shutdown)
+    loop.set_armed(False)          # окно открывается с запрещённым движением
     loop.start()
     worker.start()
     draw()
