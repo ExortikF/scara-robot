@@ -855,6 +855,47 @@ class VisionWorker:
             self._thread = None
 
 
+def check_speed_mode(bus, axes) -> None:
+    """Убедиться, что приводы в скоростном режиме.
+
+    В позиционном режиме (P-004 = 0) привод ждёт импульсы на входах
+    PULS/SIGN и команды скорости по Modbus ИГНОРИРУЕТ. Внешне это
+    выглядит хуже любой ошибки: программа работает, команды уходят,
+    приводы отвечают — а вал стоит. Поэтому проверяем до запуска.
+    """
+    from scara_drive import registers as reg
+    from scara_drive.driver import DriveError
+
+    wrong = []
+    for axis in axes:
+        try:
+            mode = bus.axis(axis.device_id).read_param(reg.P_CONTROL_MODE)
+        except DriveError as exc:
+            raise SystemExit(
+                f"\nпривод {axis.device_id} ({axis.name}) не отвечает: {exc}\n\n"
+                "Проверьте, кто на шине:\n"
+                "    python examples/scan_bus.py <порт> --baud 19200 "
+                "--parity E --ids 1-8\n") from exc
+        if mode != reg.ControlMode.SPEED:
+            wrong.append((axis, mode))
+
+    if not wrong:
+        return
+
+    lines = [f"  привод {a.device_id} ({a.name}): P-004 = {m}" for a, m in wrong]
+    raise SystemExit(
+        "\nПРИВОДЫ НЕ В СКОРОСТНОМ РЕЖИМЕ\n\n"
+        + "\n".join(lines) +
+        "\n\nВ позиционном режиме (P-004 = 0) привод ждёт импульсы на входах\n"
+        "PULS/SIGN, а команды скорости по Modbus игнорирует. Вал будет\n"
+        "стоять, хотя программа работает и приводы отвечают.\n\n"
+        "Исправить:\n"
+        + "\n".join(f"    python examples/mb.py write P-004 1 --id "
+                     f"{a.device_id} --verify" for a, _ in wrong)
+        + "\n\nЗапустить вопреки проверке: --skip-mode-check\n"
+    )
+
+
 def preflight_line(transport: SerialConfig) -> None:
     """Убедиться, что линия молчит, пока молчим мы.
 
@@ -935,6 +976,8 @@ def build_followers(args, axes):
     bus = DriveBus(transport)
     bus.connect()
     log.info("шина: %s", bus.where)
+    if not args.skip_mode_check:
+        check_speed_mode(bus, axes)
     followers = {axis.name: AngleFollower(bus.axis(axis.device_id),
                                           axis_config(args, axis))
                  for axis in axes}
@@ -1390,6 +1433,8 @@ def main() -> int:
                    help="допустимый перелёт за предел, градусов вала")
     p.add_argument("--runaway-passes", type=int, default=6,
                    help="проходов с растущей ошибкой до аварийной остановки")
+    p.add_argument("--skip-mode-check", action="store_true",
+                   help="не проверять режим приводов перед запуском")
     p.add_argument("--skip-line-check", action="store_true",
                    help="не проверять шину на шум перед запуском")
     p.add_argument("--no-limits", action="store_true",

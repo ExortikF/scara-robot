@@ -15,7 +15,7 @@
     "device_id": 2,
     "joint": "q2",
     "gear_ratio": 0.6666666666666666,
-    "reverse": false,
+    "reverse": true,
     "min_deg": -100.0,
     "max_deg": 100.0,
     "gain": 1.0,
