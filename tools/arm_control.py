@@ -471,6 +471,32 @@ class MarkerArmSource:
         self._capture.release()
 
 
+def list_cameras(max_index: int = 6) -> list[tuple[int, int, int]]:
+    """Найти доступные камеры перебором индексов.
+
+    OpenCV на macOS не отдаёт имена устройств, только порядковые номера,
+    поэтому единственный способ узнать, где какая камера, — открыть и
+    посмотреть разрешение. RealSense подключается как обычная USB-камера
+    и виден здесь же: его цветной поток берётся без всякого SDK, как с
+    веб-камеры. Карта глубины при этом недоступна, но она и не нужна —
+    углы считаются по плоскому кадру.
+    """
+    import cv2
+
+    found = []
+    for index in range(max_index):
+        capture = cv2.VideoCapture(index)
+        if not capture.isOpened():
+            capture.release()
+            continue
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            height, width = frame.shape[:2]
+            found.append((index, width, height))
+        capture.release()
+    return found
+
+
 def open_camera(cv2, index: int):
     capture = cv2.VideoCapture(index)
     if not capture.isOpened():
@@ -1198,7 +1224,10 @@ def main() -> int:
     p.add_argument("--tolerance", type=float, default=1.5)
     p.add_argument("--period", type=float, default=0.12)
     p.add_argument("--sweep", type=float, default=0.12)
-    p.add_argument("--camera", type=int, default=0)
+    p.add_argument("--camera", type=int, default=0,
+                   help="номер камеры; RealSense обычно 1 или 2")
+    p.add_argument("--list-cameras", action="store_true",
+                   help="показать доступные камеры и выйти")
     p.add_argument("--smoothing", type=float, default=0.6)
     p.add_argument("--diag", action="store_true",
                    help="замерить, где теряются кадры, и выйти")
@@ -1224,6 +1253,22 @@ def main() -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(levelname)s %(message)s")
+
+    if args.list_cameras:
+        cameras = list_cameras()
+        if not cameras:
+            print("камер не найдено.")
+            print("на macOS доступ выдаётся приложению, из которого запущен")
+            print("python, и подхватывается только НОВЫМ процессом:")
+            print("  разрешите в Системные настройки -> Конфиденциальность")
+            print("  и безопасность -> Камера, затем перезапустите Терминал.")
+            return 1
+        print("доступные камеры:\n")
+        for index, width, height in cameras:
+            print(f"  --camera {index}   {width}x{height}")
+        print("\nимён OpenCV на macOS не отдаёт — различайте по разрешению")
+        print("и по тому, какая пропадает при отключении кабеля.")
+        return 0
 
     if not (args.simulate or args.confirm or args.diag):
         print(__doc__)
