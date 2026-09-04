@@ -920,6 +920,19 @@ def check_speed_mode(bus, axes) -> None:
     if not wrong:
         return
 
+    # Раньше здесь был отказ запускаться — и это была ошибка. Связь
+    # «позиционный режим => JOG не работает» я не проверял: прочитал
+    # P-004=0, сразу поменял на 1, оси поехали, и приписал заслугу смене
+    # режима. JOG по руководству — пробный прогон, он может работать и
+    # поверх режима. Пока не проверено на стенде, только предупреждаем.
+    for axis, mode in wrong:
+        log.warning("привод %d (%s): P-004 = %d, а не 1. Если ось не поедет, "
+                    "попробуйте: python examples/mb.py write P-004 1 --id %d "
+                    "--verify", axis.device_id, axis.name, mode, axis.device_id)
+    return
+
+
+def _unused_strict_mode(wrong) -> None:
     lines = [f"  привод {a.device_id} ({a.name}): P-004 = {m}" for a, m in wrong]
     raise SystemExit(
         "\nПРИВОДЫ НЕ В СКОРОСТНОМ РЕЖИМЕ\n\n"
