@@ -293,7 +293,7 @@ class PoseArmSource:
     MIN_VISIBILITY = 0.5
 
     def __init__(self, camera_index: int = 0, side: str = "right",
-                 model_path: Path | None = None):
+                 model_path: Path | None = None, realsense: bool = False):
         try:
             import cv2
             import mediapipe as mp
@@ -326,7 +326,8 @@ class PoseArmSource:
             min_tracking_confidence=0.5,
         )
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
-        self._capture = open_camera(cv2, camera_index)
+        self._capture = (RealSenseFrames() if realsense
+                         else open_camera(cv2, camera_index))
         self._start = time.monotonic()
         self.last_frame = None
         self.last_points = None
@@ -401,7 +402,7 @@ class MarkerArmSource:
     }
     MIN_AREA_PX = 60
 
-    def __init__(self, camera_index: int = 0):
+    def __init__(self, camera_index: int = 0, realsense: bool = False):
         try:
             import cv2
             import numpy as np
@@ -416,7 +417,8 @@ class MarkerArmSource:
             log.info("создан %s — цвета меток правьте там", self.CONFIG.name)
         self.ranges = json.loads(self.CONFIG.read_text(encoding="utf-8"))
 
-        self._capture = open_camera(cv2, camera_index)
+        self._capture = (RealSenseFrames() if realsense
+                         else open_camera(cv2, camera_index))
         self.last_frame = None
         self.last_points = None
         self.note = ""
@@ -536,6 +538,108 @@ def list_cameras(max_index: int = 6, snapshot_dir: Path | None = None):
             found.append((index, width, height, saved))
         capture.release()
     return found
+
+
+class RealSenseFrames:
+    """Цветной поток RealSense через SDK, а не через UVC.
+
+    Открывать RealSense как обычную веб-камеру технически можно, но
+    картинка выходит засвеченная и с цветовым перекосом: система отдаёт
+    поток без нормальных настроек, и распознавание по нему не работает.
+    Через pyrealsense2 камера отдаёт то, на что рассчитана.
+
+    Подход перенесён из рабочего проекта arm_realsense:
+
+    * VDCAssistant сгоняется с камеры — пока системный демон держит
+      RGB-интерфейс, librealsense получает «failed to set power state»;
+    * нужны права root, иначе macOS не отдаёт устройство библиотеке;
+    * режим считается годным, только когда с него ПРИШЁЛ КАДР: старт
+      pipeline успешно проходит и на режимах, которым не хватает полосы,
+      а падает потом на ожидании кадра.
+
+    Глубина не запрашивается вовсе: углы считаются по плоскому кадру,
+    а лишний поток только съедает полосу USB.
+    """
+
+    MODES = [(640, 480, 30), (848, 480, 30), (1280, 720, 30), (640, 480, 15)]
+
+    def __init__(self, width: int = 0, height: int = 0, fps: int = 0):
+        import os
+        import subprocess
+
+        try:
+            import pyrealsense2 as rs
+        except ImportError as exc:
+            raise SystemExit(
+                "pyrealsense2 не установлен в этом окружении.\n\n"
+                "Он собран вручную в соседнем проекте, запускайте оттуда:\n"
+                "    sudo /Users/macbook/Desktop/projects/arm_realsense/"
+                "venv/bin/python tools/arm_control.py --confirm --realsense\n"
+            ) from exc
+        self._rs = rs
+
+        if os.geteuid() != 0:
+            raise SystemExit(
+                "Для RealSense нужны права root: без них macOS не отдаёт\n"
+                "камеру библиотеке.\n\nЗапускайте так:\n"
+                "    sudo killall VDCAssistant 2>/dev/null; \\\n"
+                "    sudo /Users/macbook/Desktop/projects/arm_realsense/"
+                "venv/bin/python tools/arm_control.py --confirm --realsense\n"
+            )
+
+        # Демон держит RGB-интерфейс; поднимется сам, убивать безопасно.
+        subprocess.run(["killall", "VDCAssistant"],
+                       capture_output=True, check=False)
+
+        devices = list(rs.context().query_devices())
+        if not devices:
+            raise SystemExit(
+                "RealSense не найден. Проверьте кабель — нужен USB 3, "
+                "и порт тоже USB 3.")
+        log.info("RealSense: %s", devices[0].get_info(rs.camera_info.name))
+
+        modes = ([(width, height, fps)] if width and height and fps
+                 else self.MODES)
+        errors = []
+        for w, h, f in modes:
+            try:
+                pipeline = rs.pipeline()
+                cfg = rs.config()
+                cfg.enable_stream(rs.stream.color, w, h, rs.format.bgr8, f)
+                pipeline.start(cfg)
+            except Exception as exc:
+                errors.append(f"  {w}x{h}@{f}: не стартовал — {exc}")
+                continue
+            try:
+                pipeline.wait_for_frames(3000)     # настоящая проверка
+            except Exception as exc:
+                errors.append(f"  {w}x{h}@{f}: стартовал, но кадров нет — {exc}")
+                pipeline.stop()
+                continue
+            self.pipeline = pipeline
+            log.info("RealSense: режим %dx%d@%d", w, h, f)
+            return
+
+        raise SystemExit("ни один режим не отдал кадр:\n" + "\n".join(errors))
+
+    def read(self):
+        """Вернуть (ok, кадр BGR) — как cv2.VideoCapture.read()."""
+        import numpy as np
+
+        try:
+            frames = self.pipeline.wait_for_frames(2000)
+        except Exception:
+            return False, None
+        colour = frames.get_color_frame()
+        if not colour:
+            return False, None
+        return True, np.asanyarray(colour.get_data())
+
+    def release(self):
+        try:
+            self.pipeline.stop()
+        except Exception:
+            pass
 
 
 def open_camera(cv2, index: int):
@@ -1266,7 +1370,10 @@ def main() -> int:
     p.add_argument("--period", type=float, default=0.12)
     p.add_argument("--sweep", type=float, default=0.12)
     p.add_argument("--camera", type=int, default=0,
-                   help="номер камеры; RealSense обычно 1 или 2")
+                   help="номер обычной камеры")
+    p.add_argument("--realsense", action="store_true",
+                   help="брать кадры с RealSense через SDK, а не как с "
+                        "веб-камеры; нужен sudo и питон из arm_realsense")
     p.add_argument("--list-cameras", action="store_true",
                    help="показать доступные камеры и выйти")
     p.add_argument("--smoothing", type=float, default=0.6)
@@ -1348,8 +1455,10 @@ def main() -> int:
         return 1
 
     if args.diag:
-        source = (PoseArmSource(args.camera, args.side) if args.source == "pose"
-                  else MarkerArmSource(args.camera))
+        source = (PoseArmSource(args.camera, args.side,
+                                realsense=args.realsense)
+                  if args.source == "pose"
+                  else MarkerArmSource(args.camera, realsense=args.realsense))
         source.MIN_VISIBILITY = args.min_visibility
         arm_filter = ArmFilter(smoothing=args.smoothing,
                                max_len_change=args.max_len_change,
@@ -1386,8 +1495,9 @@ def main() -> int:
     loop = MultiAxisFollower(followers, period_s=args.sweep)
     loop.set_zero_here()
 
-    source = (PoseArmSource(args.camera, args.side) if args.source == "pose"
-              else MarkerArmSource(args.camera))
+    source = (PoseArmSource(args.camera, args.side, realsense=args.realsense)
+              if args.source == "pose"
+              else MarkerArmSource(args.camera, realsense=args.realsense))
     source.MIN_VISIBILITY = args.min_visibility
     arm_filter = ArmFilter(median_window=3, smoothing=args.smoothing,
                            max_len_change=args.max_len_change,
