@@ -5,10 +5,10 @@
     "joint": "q1",
     "gear_ratio": 10.0,
     "reverse": false,
-    "min_deg": -90.0,
-    "max_deg": 90.0,
+    "min_deg": -100.0,
+    "max_deg": 100.0,
     "gain": 1.0,
-    "max_joint_deg_s": 60.0
+    "max_joint_deg_s": 90.0
   },
   {
     "name": "J2 локоть",
@@ -16,9 +16,9 @@
     "joint": "q2",
     "gear_ratio": 0.6666666666666666,
     "reverse": false,
-    "min_deg": -90.0,
-    "max_deg": 90.0,
+    "min_deg": -100.0,
+    "max_deg": 100.0,
     "gain": 1.0,
-    "max_joint_deg_s": 60.0
+    "max_joint_deg_s": 90.0
   }
 ]

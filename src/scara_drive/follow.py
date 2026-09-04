@@ -170,8 +170,11 @@ class AngleFollower:
         self._target_rate_deg_s = 0.0
         self._worse_passes = 0            # подряд проходов с растущей ошибкой
         self._last_abs_error: float | None = None
+        self._out_passes = 0              # подряд проходов с растущим выходом
+        self._last_overshoot: float | None = None
         self.fault: str | None = None     # причина аварийной остановки
         self.relaxed = False              # момент снят, вал крутится руками
+        self.out_of_range = 0.0           # на сколько вал за пределом
         self._last_target_deg: float | None = None
         self._last_target_time: float | None = None
         self._stop = threading.Event()
@@ -328,16 +331,37 @@ class AngleFollower:
         # Дальше двигать нельзя ни в каком случае: гасим и поднимаем аварию.
         overshoot = self.beyond_limit(actual)
         if overshoot:
-            self.drive.hold()
-            self.fault = (
-                f"вал вышел за предел на {abs(overshoot):.1f}° "
-                f"(положение {actual:.0f}°, допустимо "
-                f"{cfg.min_motor_deg:.0f}..{cfg.max_motor_deg:.0f}°)")
-            self.telemetry = Telemetry(
-                target_deg=target, actual_deg=actual, error_deg=error,
-                command_rpm=0, holding=True, raw_counts=raw,
-                passes=self.telemetry.passes + 1)
-            raise DriveFault(self.fault)
+            # Ось за пределом. Глухо запрещать движение нельзя: тогда из
+            # этого состояния не выбраться иначе как руками. Вместо этого
+            # целью становится ближайшая граница — ось возвращается в зону.
+            target = actual - overshoot
+            error = self.angle_error(target, actual)
+            self.out_of_range = abs(overshoot)
+
+            # Авария поднимается, только если выход РАСТЁТ: значит ось не
+            # возвращается, а продолжает уходить, и это уже настоящий отказ.
+            if (self._last_overshoot is not None
+                    and abs(overshoot) > abs(self._last_overshoot) + 0.5):
+                self._out_passes += 1
+            else:
+                self._out_passes = 0
+            self._last_overshoot = overshoot
+
+            if self._out_passes >= cfg.runaway_passes:
+                self.drive.hold()
+                self.fault = (
+                    f"вал уходит за предел: {abs(overshoot):.0f}° сверх "
+                    f"допустимого и продолжает расти. Положение {actual:.0f}°, "
+                    f"разрешено {cfg.min_motor_deg:.0f}..{cfg.max_motor_deg:.0f}°")
+                self.telemetry = Telemetry(
+                    target_deg=target, actual_deg=actual, error_deg=error,
+                    command_rpm=0, holding=True, raw_counts=raw,
+                    passes=self.telemetry.passes + 1)
+                raise DriveFault(self.fault)
+        else:
+            self.out_of_range = 0.0
+            self._out_passes = 0
+            self._last_overshoot = None
 
         # ── слой 3: ось едет не в ту сторону ──────────────────────────
         #
@@ -504,6 +528,36 @@ class MultiAxisFollower:
         self.sweeps = 0
         self.dropped = 0
         self.sweep_ms = 0.0
+
+    def clear_fault(self) -> bool:
+        """Снять аварию и снова запустить контур.
+
+        Оси остаются там, где стоят: целью становится текущее положение.
+        Если ось за пределом, она вернётся в зону сама — за предел
+        отпускать её больше не будут.
+
+        Возвращает False, если снимать было нечего.
+        """
+        if not self.error_text and not self._fault_axis:
+            return False
+
+        for follower in self.followers.values():
+            follower.fault = None
+            follower._worse_passes = 0
+            follower._last_abs_error = None
+            follower._out_passes = 0
+            follower._last_overshoot = None
+
+        self.error_text = None
+        self.warning_text = None
+        self._fault_axis = None
+
+        if self._thread is None:
+            self.freeze()
+            self.start()
+        else:
+            self.freeze()
+        return True
 
     def freeze(self) -> None:
         """Остановить все оси там, где они стоят."""

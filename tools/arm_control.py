@@ -125,8 +125,8 @@ class ArmAxis:
     joint: str                    # "q1" — плечо, "q2" — локоть
     gear_ratio: float = 1.0       # оборотов вала на оборот сустава
     reverse: bool = False         # передача переворачивает направление
-    min_deg: float = -90.0        # предел сустава от середины
-    max_deg: float = 90.0
+    min_deg: float = -100.0       # предел сустава от середины
+    max_deg: float = 100.0
     gain: float = 1.0             # во сколько раз повторять движение руки
     max_joint_deg_s: float = 60.0 # потолок скорости сустава
 
@@ -220,7 +220,7 @@ def load_axes() -> list[ArmAxis]:
 
         # «Без предела» из версии до установки редукторов: с механикой на
         # месте безграничный ход опасен, возвращаем ±90°.
-        for side, fallback in (("min_deg", -90.0), ("max_deg", 90.0)):
+        for side, fallback in (("min_deg", -100.0), ("max_deg", 100.0)):
             if item.get(side) is None:
                 item[side] = fallback
                 changed = True
@@ -890,6 +890,16 @@ def run_gui(loop, source, axes, arm_filter, args):
         status.config(text="ОСТАНОВЛЕНО кнопкой. Перезапустите приложение.",
                       foreground="#e05252")
 
+    def clear_fault():
+        """Снять аварию и вернуть контур в работу — но только на паузе."""
+        if not loop.clear_fault():
+            status.config(text="аварии нет — сбрасывать нечего", foreground="")
+            return
+        paused["value"] = True
+        pause_button.config(text="ПРОДОЛЖИТЬ")
+        status.config(text="авария снята, оси стоят на месте. Проверьте "
+                           "причину, потом снимайте паузу.", foreground="")
+
     def toggle_relax():
         """Снять момент, чтобы двигать руку робота вручную, и вернуть обратно."""
         relaxed["value"] = not relaxed["value"]
@@ -958,6 +968,8 @@ def run_gui(loop, source, axes, arm_filter, args):
         row=0, column=3, padx=6)
     relax_button = ttk.Button(buttons, text="РАССЛАБИТЬ", command=toggle_relax)
     relax_button.grid(row=0, column=4, padx=6)
+    ttk.Button(buttons, text="СБРОС ОШИБКИ", command=clear_fault).grid(
+        row=0, column=5, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1}
     zeroed = {"value": False}
@@ -1020,15 +1032,21 @@ def run_gui(loop, source, axes, arm_filter, args):
             labels[7].config(text="расслаблена" if relaxed["value"]
                              else ("удержание" if telemetry.holding else "едет"))
 
+            out = loop.followers[axis.name].out_of_range
             clamped = False
             if human_joints is not None:
                 raw = (human_joints[0] if axis.joint == "q1"
                        else human_joints[1])
                 clamped = axis.is_clamped(raw)
-            labels[8].config(
-                text=(f"УПЁРЛАСЬ  {axis.limits_text()}" if clamped
-                      else axis.limits_text()),
-                foreground="#ffb648" if clamped else "")
+            if out:
+                text = f"ЗА ПРЕДЕЛОМ на {axis.motor_to_joint(out):.1f}°"
+                colour = "#e05252"
+            elif clamped:
+                text = f"УПЁРЛАСЬ  {axis.limits_text()}"
+                colour = "#ffb648"
+            else:
+                text, colour = axis.limits_text(), ""
+            labels[8].config(text=text, foreground=colour)
             commanded.append(axis.motor_to_joint(telemetry.actual_deg))
 
         robot_view.update(commanded[0], commanded[1], human_joints)
@@ -1244,8 +1262,9 @@ def main() -> int:
         print(f"           {'':<11}    это {axis.joint_to_motor(axis.max_deg):+.0f}° "
               f"вала, потолок {axis.max_motor_rpm} об/мин")
     print()
-    print("защита: цель прижимается к пределам, выход вала за предел и")
-    print("        движение не в ту сторону гасят ОБЕ оси немедленно")
+    print("защита: цель прижимается к пределам; ось за пределом сама")
+    print("        возвращается в зону; движение не в ту сторону гасит")
+    print("        ОБЕ оси. Кнопка «СБРОС ОШИБКИ» снимает аварию.")
     print()
 
     followers, bus = build_followers(args, axes)
