@@ -1034,6 +1034,24 @@ def build_followers(args, axes):
     return followers, bus
 
 
+def axis_tolerance(args, axis: "ArmAxis") -> float:
+    """Допуск оси в градусах вала.
+
+    Задаётся в градусах СУСТАВА, чтобы одна цифра означала у всех осей
+    одинаковую точность: из-за разных передач тот же допуск в градусах
+    вала давал у локтя в пятнадцать раз более грубую зону, и он переставал
+    замечать мелкие движения руки.
+
+    Снизу ограничен путём, который ось проходит за цикл контура на
+    минимальной скорости. Привод принимает целые об/мин и ниже одного не
+    опускается, поэтому меньший допуск ось физически не выдержит — будет
+    перескакивать зону и рыскать вокруг цели.
+    """
+    wanted = args.tolerance * abs(axis.gear_ratio)
+    floor = 1.5 * 6.0 * args.period          # 1 об/мин = 6 град/с
+    return max(wanted, floor)
+
+
 def axis_config(args, axis: ArmAxis) -> FollowConfig:
     """Настройки контура под конкретную ось.
 
@@ -1055,7 +1073,12 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
         invert_encoder=not args.no_invert,
         kp=args.kp,
         max_rpm=args.max_rpm or axis.max_motor_rpm,
-        tolerance_deg=args.tolerance,
+        # Допуск задаётся в градусах сустава и переводится в градусы вала
+        # под передачу каждой оси. Иначе одна и та же цифра означает у
+        # разных осей разную точность: при редукторе 10 и повышающей 1.5
+        # разница выходит в пятнадцать раз, и ось с грубым допуском
+        # перестаёт замечать мелкие движения руки.
+        tolerance_deg=axis_tolerance(args, axis),
         period_s=args.period,
         circular=False,          # ход ограничен, витки различать обязательно
         min_motor_deg=low,
@@ -1412,16 +1435,9 @@ def run_gui(loop, source, axes, arm_filter, args):
                           "распознаёт человека под этим ракурсом")
             elif counts["точки видны"] == 0:
                 reason = f"поза есть, но сустав скрыт: {source.funnel.last_loss}"
-            elif counts["фильтр принял"] == 0:
-                reason = ("точки есть, но фильтр отбрасывает всё как рывки — "
-                          "ослабьте: --max-len-change 0.5 --max-jump 90")
             else:
-                accepted = arm_filter.accepted
-                rejected = arm_filter.rejected
-                total = accepted + rejected
-                share = rejected / total * 100 if total else 0
-                reason = (f"распознавание срывается: отброшено {share:.0f}% "
-                          f"кадров, последний за {time.monotonic() - state['last_target_ms']:.0f} с")
+                idle = time.monotonic() - state["last_target_ms"]
+                reason = f"точек нет уже {idle:.0f} с"
             status.config(text=f"РОБОТ СТОИТ: {reason}", foreground="#e05252")
         elif relaxed["value"]:
             status.config(text="МОМЕНТ СНЯТ — оси свободны, положение "
@@ -1560,7 +1576,8 @@ def main() -> int:
                    help="общий потолок об/мин; 0 — считать по каждой оси")
     p.add_argument("--kp", type=float, default=0.6,
                    help="об/мин на градус ошибки; больше — плотнее слежение")
-    p.add_argument("--tolerance", type=float, default=1.5)
+    p.add_argument("--tolerance", type=float, default=1.0,
+                   help="допуск в градусах СУСТАВА, одинаковый для всех осей")
     p.add_argument("--period", type=float, default=0.12)
     p.add_argument("--sweep", type=float, default=0.12)
     p.add_argument("--camera", type=int, default=0,
@@ -1576,10 +1593,6 @@ def main() -> int:
     p.add_argument("--diag-seconds", type=float, default=12.0)
     p.add_argument("--min-visibility", type=float, default=0.5,
                    help="порог видимости сустава, ниже — кадр отбрасывается")
-    p.add_argument("--max-len-change", type=float, default=0.45,
-                   help="допустимый скачок длины звена за кадр")
-    p.add_argument("--max-jump", type=float, default=80.0,
-                   help="допустимый скачок угла за кадр, градусы")
     p.add_argument("--limit-margin", type=float, default=3.0,
                    help="допустимый перелёт за предел, градусов вала")
     p.add_argument("--runaway-passes", type=int, default=6,
@@ -1661,8 +1674,8 @@ def main() -> int:
                   else MarkerArmSource(args.camera, realsense=args.realsense))
         source.MIN_VISIBILITY = args.min_visibility
         arm_filter = ArmFilter(smoothing=args.smoothing,
-                               max_len_change=args.max_len_change,
-                               max_jump_deg=args.max_jump)
+                               max_len_change=float("inf"),
+                               max_jump_deg=float("inf"))
         try:
             return run_diag(source, arm_filter, args.diag_seconds)
         finally:
@@ -1685,6 +1698,13 @@ def main() -> int:
               f"{axis.gear_text():<22} сустав {axis.limits_text()}")
         print(f"           {'':<11}    это {axis.joint_to_motor(axis.max_deg):+.0f}° "
               f"вала, потолок {axis.max_motor_rpm} об/мин")
+    print()
+    for axis in axes:
+        tol = axis_tolerance(args, axis)
+        raised = "  (поднят: ниже ось рыскала бы)" if (
+            tol > args.tolerance * abs(axis.gear_ratio) + 1e-6) else ""
+        print(f"  допуск {axis.name}: "
+              f"{abs(axis.motor_to_joint(tol)):.2f}° сустава{raised}")
     print()
     print("защита: цель прижимается к пределам; ось за пределом сама")
     print("        возвращается в зону; движение не в ту сторону гасит")
@@ -1709,9 +1729,13 @@ def main() -> int:
               if args.source == "pose"
               else MarkerArmSource(args.camera, realsense=args.realsense))
     source.MIN_VISIBILITY = args.min_visibility
+    # Отсев кадров убран: он резал нормальные движения, а картина
+    # «скелет на экране есть, а робот стоит» разбиралась дольше, чем
+    # стоили пойманные сбои. Осталось сглаживание — оно нужно, чтобы
+    # ось не дёргалась на дрожании точек.
     arm_filter = ArmFilter(median_window=3, smoothing=args.smoothing,
-                           max_len_change=args.max_len_change,
-                           max_jump_deg=args.max_jump)
+                           max_len_change=float("inf"),
+                           max_jump_deg=float("inf"))
 
     try:
         return run_gui(loop, source, axes, arm_filter, args)
