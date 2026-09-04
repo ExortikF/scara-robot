@@ -471,6 +471,33 @@ class MarkerArmSource:
         self._capture.release()
 
 
+def camera_names() -> list[str]:
+    """Имена камер от системы.
+
+    OpenCV на macOS имён не отдаёт, а system_profiler отдаёт. Порядок в
+    его выводе обычно совпадает с индексами AVFoundation, но гарантии нет,
+    поэтому имена показываем как подсказку, а не как точное соответствие.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPCameraDataType"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    names = []
+    for line in out.splitlines():
+        stripped = line.strip()
+        # Имя устройства — строка с двоеточием на втором уровне отступа.
+        if (stripped.endswith(":") and not stripped.startswith("Camera")
+                and ":" not in stripped[:-1]
+                and len(line) - len(line.lstrip()) == 4):
+            names.append(stripped[:-1])
+    return names
+
+
 def list_cameras(max_index: int = 6, snapshot_dir: Path | None = None):
     """Найти доступные камеры перебором индексов.
 
@@ -1278,12 +1305,35 @@ def main() -> int:
             print("  разрешите в Системные настройки -> Конфиденциальность")
             print("  и безопасность -> Камера, затем перезапустите Терминал.")
             return 1
+        names = camera_names()
         print("доступные камеры:\n")
         for index, width, height, saved in cameras:
             line = f"  --camera {index}   {width}x{height}"
+            if index < len(names):
+                line += f"   {names[index]}"
             if saved:
-                line += f"   кадр: {saved.name}"
+                line += f"   [{saved.name}]"
             print(line)
+
+        if names:
+            print("\nимена от системы (порядок может не совпадать с "
+                  "индексами):")
+            for i, name in enumerate(names):
+                print(f"  {i}. {name}")
+
+        joined = " ".join(names).lower()
+        if "iphone" in joined or "patron" in joined or "continuity" in joined:
+            print("\nВНИМАНИЕ: в списке есть iPhone. macOS подставляет его")
+            print("как камеру, когда телефон рядом, и НУМЕРАЦИЯ СДВИГАЕТСЯ —")
+            print("та же цифра завтра означает другую камеру.")
+            print("Отключите Continuity Camera на телефоне:")
+            print("  Настройки -> Основные -> AirPlay и Continuity ->")
+            print("  Continuity Camera — выключить")
+        if "depth" in joined:
+            print("\nВНИМАНИЕ: от RealSense виден узел Depth, а не RGB.")
+            print("Это инфракрасный поток, а не цветной. Распознавание позы")
+            print("рассчитано на цветной кадр и по ИК работает ненадёжно.")
+            print("Посмотрите сохранённый кадр: если он серый — это оно.")
         if any(c[3] for c in cameras):
             print(f"\nкадры сохранены в {shots}")
             print("откройте их — по картинке видно, какая камера какая:")
