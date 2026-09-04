@@ -541,27 +541,36 @@ def list_cameras(max_index: int = 6, snapshot_dir: Path | None = None):
 
 
 class RealSenseFrames:
-    """Цветной поток RealSense через SDK, а не через UVC.
+    """Цветной поток RealSense через SDK. Глубина не запрашивается вовсе.
 
     Открывать RealSense как обычную веб-камеру технически можно, но
     картинка выходит засвеченная и с цветовым перекосом: система отдаёт
-    поток без нормальных настроек, и распознавание по нему не работает.
-    Через pyrealsense2 камера отдаёт то, на что рассчитана.
+    поток без нормальных настроек. Через pyrealsense2 камера отдаёт то,
+    на что рассчитана.
 
     Подход перенесён из рабочего проекта arm_realsense:
 
     * VDCAssistant сгоняется с камеры — пока системный демон держит
       RGB-интерфейс, librealsense получает «failed to set power state»;
     * нужны права root, иначе macOS не отдаёт устройство библиотеке;
-    * режим считается годным, только когда с него ПРИШЁЛ КАДР: старт
-      pipeline успешно проходит и на режимах, которым не хватает полосы,
-      а падает потом на ожидании кадра.
+    * список режимов спрашиваем у самой камеры: он зависит от модели,
+      прошивки и сильнее всего от того, USB 2 сейчас или USB 3;
+    * режим считается годным, только когда с него ПРИШЁЛ КАДР —
+      pipeline.start() соглашается и на режимы, которым не хватает
+      полосы, а падает уже на ожидании кадра;
+    * удачный режим запоминается: перебор честный, но медленный, и со
+      стороны выглядит зависшим скриптом.
 
-    Глубина не запрашивается вовсе: углы считаются по плоскому кадру,
-    а лишний поток только съедает полосу USB.
+    Отличие от того проекта одно: там нужна была глубина, здесь нет.
+    Отказ от неё освобождает половину полосы USB, поэтому проходят
+    режимы, которые вдвоём с глубиной не тянулись.
     """
 
-    MODES = [(640, 480, 30), (848, 480, 30), (1280, 720, 30), (640, 480, 15)]
+    #: Запасной список, если опросить камеру не удалось.
+    FALLBACK_MODES = [(640, 480, 30), (640, 480, 15), (848, 480, 30),
+                      (1280, 720, 30), (424, 240, 30)]
+
+    MODE_CACHE = Path(__file__).with_name("realsense_mode.json")
 
     def __init__(self, width: int = 0, height: int = 0, fps: int = 0):
         import os
@@ -572,9 +581,9 @@ class RealSenseFrames:
         except ImportError as exc:
             raise SystemExit(
                 "pyrealsense2 не установлен в этом окружении.\n\n"
-                "Он собран вручную в соседнем проекте, запускайте оттуда:\n"
-                "    sudo /Users/macbook/Desktop/projects/arm_realsense/"
-                "venv/bin/python tools/arm_control.py --confirm --realsense\n"
+                "Запускайте из окружения, где он собран:\n"
+                "    sudo ./.venv-rs/bin/python tools/arm_control.py "
+                "--confirm --realsense\n"
             ) from exc
         self._rs = rs
 
@@ -583,8 +592,8 @@ class RealSenseFrames:
                 "Для RealSense нужны права root: без них macOS не отдаёт\n"
                 "камеру библиотеке.\n\nЗапускайте так:\n"
                 "    sudo killall VDCAssistant 2>/dev/null; \\\n"
-                "    sudo /Users/macbook/Desktop/projects/arm_realsense/"
-                "venv/bin/python tools/arm_control.py --confirm --realsense\n"
+                "    sudo ./.venv-rs/bin/python tools/arm_control.py "
+                "--confirm --realsense\n"
             )
 
         # Демон держит RGB-интерфейс; поднимется сам, убивать безопасно.
@@ -594,17 +603,19 @@ class RealSenseFrames:
         devices = list(rs.context().query_devices())
         if not devices:
             raise SystemExit(
-                "RealSense не найден. Проверьте кабель — нужен USB 3, "
-                "и порт тоже USB 3.")
+                "RealSense не найден. Нужен USB 3 — и кабель, и разъём.")
         log.info("RealSense: %s", devices[0].get_info(rs.camera_info.name))
 
         modes = ([(width, height, fps)] if width and height and fps
-                 else self.MODES)
+                 else self._modes_for(devices[0]))
+        self.pipeline = None
         errors = []
         for w, h, f in modes:
             try:
                 pipeline = rs.pipeline()
                 cfg = rs.config()
+                # Только цвет. Глубину не включаем — она тут не нужна и
+                # съедала бы полосу, из-за которой режим может не пойти.
                 cfg.enable_stream(rs.stream.color, w, h, rs.format.bgr8, f)
                 pipeline.start(cfg)
             except Exception as exc:
@@ -613,17 +624,72 @@ class RealSenseFrames:
             try:
                 pipeline.wait_for_frames(3000)     # настоящая проверка
             except Exception as exc:
-                errors.append(f"  {w}x{h}@{f}: стартовал, но кадров нет — {exc}")
-                pipeline.stop()
+                errors.append(f"  {w}x{h}@{f}: кадров нет — {exc}")
+                try:
+                    pipeline.stop()
+                except Exception:
+                    pass
                 continue
             self.pipeline = pipeline
-            log.info("RealSense: режим %dx%d@%d", w, h, f)
+            self._save_mode(w, h, f)
+            log.info("RealSense: цветной поток %dx%d@%d", w, h, f)
             return
 
         raise SystemExit("ни один режим не отдал кадр:\n" + "\n".join(errors))
 
+    # --- выбор режима -----------------------------------------------------
+
+    def _modes_for(self, device) -> list[tuple[int, int, int]]:
+        """Режимы цветного сенсора, от самых подходящих к прочим."""
+        rs = self._rs
+        found = set()
+        for sensor in device.sensors:
+            try:
+                profiles = list(sensor.profiles)
+            except Exception:
+                continue      # сенсор занят — пропускаем, не роняя всё
+            for profile in profiles:
+                if "color" not in str(profile.stream_type()):
+                    continue
+                try:
+                    video = profile.as_video_stream_profile()
+                except Exception:
+                    continue
+                found.add((video.width(), video.height(), profile.fps()))
+
+        modes = sorted(found | set(self.FALLBACK_MODES), key=self._rank)
+
+        # Удачный прошлый режим — вперёд списка: перебор честный, но
+        # медленный, каждый негодный режим съедает секунды.
+        cached = self._load_mode()
+        if cached:
+            modes = [cached] + [m for m in modes if m != cached]
+        return modes
+
+    @staticmethod
+    def _rank(mode) -> tuple:
+        """Для слежения за рукой частота важнее числа пикселей."""
+        w, h, f = mode
+        return (0 if 15 <= f <= 30 else 1, abs(w * h - 640 * 480), -f)
+
+    def _load_mode(self):
+        try:
+            data = json.loads(self.MODE_CACHE.read_text(encoding="utf-8"))
+            return int(data["w"]), int(data["h"]), int(data["fps"])
+        except Exception:
+            return None
+
+    def _save_mode(self, w: int, h: int, f: int) -> None:
+        try:
+            self.MODE_CACHE.write_text(
+                json.dumps({"w": w, "h": h, "fps": f}), encoding="utf-8")
+        except OSError:
+            pass
+
+    # --- как у cv2.VideoCapture -------------------------------------------
+
     def read(self):
-        """Вернуть (ok, кадр BGR) — как cv2.VideoCapture.read()."""
+        """Вернуть (ok, кадр BGR)."""
         import numpy as np
 
         try:
@@ -637,7 +703,8 @@ class RealSenseFrames:
 
     def release(self):
         try:
-            self.pipeline.stop()
+            if self.pipeline is not None:
+                self.pipeline.stop()
         except Exception:
             pass
 
