@@ -670,8 +670,15 @@ COLOR_JOINT = (255, 255, 255)
 COLOR_ARC = (61, 220, 132)
 
 
-def draw_arm(cv2, rgb, points, angles):
-    """Нанести на кадр звенья, суставы и дуги углов."""
+def draw_arm(cv2, rgb, points, angles, zero_q1=None):
+    """Нанести на кадр звенья, суставы и дуги углов.
+
+    ``zero_q1`` — направление плеча в момент калибровки середины. Если оно
+    известно, угол плеча показывается ОТНОСИТЕЛЬНО него: ноль в середине,
+    рост в ту же сторону, куда пойдёт ось. Так число на экране совпадает
+    с тем, что делает робот, и не возникает вопроса, от какой стороны
+    отсчитывать. Без калибровки отсчёт идёт от горизонтали.
+    """
     frame = rgb.copy()
     if points is None:
         return frame
@@ -684,9 +691,19 @@ def draw_arm(cv2, rgb, points, angles):
         cv2.circle(frame, point, radius, (0, 0, 0), 2)
 
     if angles is not None:
-        # Плечо: от горизонтали до первого звена.
-        _arc(cv2, frame, shoulder, 0.0, angles.q1_deg,
-             f"{angles.q1_deg:+.0f}", offset=(14, -54))
+        if zero_q1 is None:
+            _arc(cv2, frame, shoulder, 0.0, angles.q1_deg,
+                 f"{angles.q1_deg:+.0f}")
+        else:
+            relative = wrap180(angles.q1_deg - zero_q1)
+            _arc(cv2, frame, shoulder, zero_q1, relative, f"{relative:+.0f}")
+            # Пунктиром — направление середины, чтобы было видно, от чего
+            # отсчёт. Без этого «+15°» ни о чём не говорит.
+            import math
+            a = math.radians(-zero_q1)
+            end = (int(shoulder[0] + 78 * math.cos(a)),
+                   int(shoulder[1] + 78 * math.sin(a)))
+            cv2.line(frame, shoulder, end, (120, 120, 120), 1)
 
         # Локоть рисуем ВНУТРИ сгиба: от направления «локоть -> плечо» к
         # «локоть -> запястье». Раньше дуга шла от продолжения плеча, то
@@ -1157,8 +1174,9 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     status = ttk.Label(root, text="", font=("SF Pro Text", 11))
     status.pack(pady=(0, 4))
-    detector = ttk.Label(root, text="", font=("SF Pro Text", 11), foreground="#888")
-    detector.pack(pady=(0, 8))
+    detector = ttk.Label(root, text="", font=("SF Pro Text", 11),
+                         foreground="#888")
+    # Появляется по кнопке «диагностика», а не постоянно.
 
     buttons = ttk.Frame(root)
     buttons.pack(pady=(0, 14))
@@ -1186,6 +1204,20 @@ def run_gui(loop, source, axes, arm_filter, args):
         pause_button.config(text="ПРОДОЛЖИТЬ")
         status.config(text="ОСТАНОВЛЕНО кнопкой. Перезапустите приложение.",
                       foreground="#e05252")
+
+    def toggle_diag():
+        """Показать или спрятать строку со статистикой распознавания.
+
+        В обычной работе она только мешает: проценты отброшенных кадров
+        нужны при разборе, а не когда всё едет.
+        """
+        show_diag["value"] = not show_diag["value"]
+        if show_diag["value"]:
+            detector.pack(pady=(0, 8))
+            diag_button.config(text="скрыть диагностику")
+        else:
+            detector.pack_forget()
+            diag_button.config(text="диагностика")
 
     def clear_fault():
         """Снять аварию и вернуть контур в работу — но только на паузе."""
@@ -1267,11 +1299,15 @@ def run_gui(loop, source, axes, arm_filter, args):
     relax_button.grid(row=0, column=4, padx=6)
     ttk.Button(buttons, text="СБРОС ОШИБКИ", command=clear_fault).grid(
         row=0, column=5, padx=6)
+    diag_button = ttk.Button(buttons, text="диагностика",
+                             command=lambda: toggle_diag())
+    diag_button.grid(row=0, column=6, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1,
              "last_target_ms": 0.0}
     zeroed = {"value": False}
     relaxed = {"value": False}
+    show_diag = {"value": False}
 
     def on_target(smoothed):
         """Вызывается из потока распознавания."""
@@ -1306,7 +1342,8 @@ def run_gui(loop, source, axes, arm_filter, args):
         # изображение Tk стоит дорого, а распознавание идёт своим темпом.
         if frame is not None and frame_id != state["shown_frame"]:
             state["shown_frame"] = frame_id
-            painted = draw_arm(cv2, frame, points, angles)
+            painted = draw_arm(cv2, frame, points, angles,
+                               zero["q1"] if zeroed["value"] else None)
             image = Image.fromarray(painted)
             image.thumbnail((720, 430))
             photo = ImageTk.PhotoImage(image)
@@ -1395,6 +1432,8 @@ def run_gui(loop, source, axes, arm_filter, args):
             status.config(text=f"ведём   обход шины {loop.sweep_ms:.0f} мс   "
                                f"всего {loop.sweeps}", foreground="")
 
+        if not show_diag["value"]:
+            return
         note = source.funnel.last_loss or source.note
         errors = state["errors"] + worker.errors
         tail = ""
