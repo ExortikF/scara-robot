@@ -23,6 +23,10 @@ from . import registers as reg
 log = logging.getLogger(__name__)
 
 
+class DriveFault(RuntimeError):
+    """Ось остановлена защитой. Продолжать нельзя."""
+
+
 def shortest_angle_error(target_deg: float, actual_deg: float) -> float:
     """Кратчайшая знаковая ошибка по окружности, в диапазоне [-180, 180).
 
@@ -63,6 +67,27 @@ class FollowConfig:
     #:         ±90° при передаточном 10 требует ±900° на валу мотора, и
     #:         сведение по модулю оборота потеряло бы, на каком витке ось.
     circular: bool = True
+
+    # ═══ ЗАЩИТА ОСИ ═══
+    #
+    # Ограничение цели — только первый слой. Он не спасает, если ось поехала
+    # не в ту сторону: цель останется в пределах, а вал уйдёт в упор. Поэтому
+    # проверяется и фактическое положение, и само направление движения.
+
+    #: Жёсткие пределы хода в градусах ВАЛА от нуля. None — предела нет.
+    min_motor_deg: float | None = None
+    max_motor_deg: float | None = None
+
+    #: Насколько можно выйти за предел, прежде чем это считается аварией.
+    #: Ноль здесь не годится: ось всегда чуть перелетает из-за дискретности
+    #: задания скорости, и авария срабатывала бы на каждом подходе к краю.
+    limit_margin_deg: float = 3.0
+
+    #: Сколько проходов подряд ошибка может РАСТИ при работающем приводе,
+    #: прежде чем это признаётся движением не в ту сторону. Ловит
+    #: перевёрнутый знак энкодера и неверный reverse — то, из-за чего ось
+    #: разгоняется в упор вместо подхода к цели.
+    runaway_passes: int = 6
 
     kp: float = 0.225                 # об/мин на градус ошибки
     min_rpm: int = 1                  # привод принимает целые об/мин
@@ -143,6 +168,9 @@ class AngleFollower:
         self._lock = threading.Lock()
         self._smoothed_deg: float | None = None
         self._target_rate_deg_s = 0.0
+        self._worse_passes = 0            # подряд проходов с растущей ошибкой
+        self._last_abs_error: float | None = None
+        self.fault: str | None = None     # причина аварийной остановки
         self._last_target_deg: float | None = None
         self._last_target_time: float | None = None
         self._stop = threading.Event()
@@ -151,11 +179,34 @@ class AngleFollower:
 
     # --- цель -------------------------------------------------------------
 
+    def clamp_motor(self, degrees: float) -> float:
+        """Прижать угол вала к жёстким пределам."""
+        if self.config.min_motor_deg is not None:
+            degrees = max(self.config.min_motor_deg, degrees)
+        if self.config.max_motor_deg is not None:
+            degrees = min(self.config.max_motor_deg, degrees)
+        return degrees
+
+    def beyond_limit(self, motor_deg: float) -> float:
+        """На сколько градусов вал вышел за предел. 0 — в пределах."""
+        margin = self.config.limit_margin_deg
+        low, high = self.config.min_motor_deg, self.config.max_motor_deg
+        if low is not None and motor_deg < low - margin:
+            return motor_deg - (low - margin)
+        if high is not None and motor_deg > high + margin:
+            return motor_deg - (high + margin)
+        return 0.0
+
     def set_target(self, degrees: float) -> None:
-        """Поставить новую цель. Вызывается из потока источника."""
+        """Поставить новую цель. Вызывается из потока источника.
+
+        Цель прижимается к пределам здесь же: даже если снаружи пришло
+        заведомо недопустимое значение, до привода оно не дойдёт.
+        """
+        value = (normalize_360(degrees) if self.config.circular
+                 else self.clamp_motor(float(degrees)))
         with self._lock:
-            self._target_deg = (normalize_360(degrees) if self.config.circular
-                                else float(degrees))
+            self._target_deg = value
 
     def _take_target(self) -> float:
         with self._lock:
@@ -240,6 +291,48 @@ class AngleFollower:
         actual = self.counts_to_degrees(raw)
         target = self._take_target()
         error = self.angle_error(target, actual)
+
+        # ── слой 2: фактическое положение вышло за предел ──────────────
+        #
+        # Сюда попадаем, если ось перелетела край или уехала не туда.
+        # Дальше двигать нельзя ни в каком случае: гасим и поднимаем аварию.
+        overshoot = self.beyond_limit(actual)
+        if overshoot:
+            self.drive.hold()
+            self.fault = (
+                f"вал вышел за предел на {abs(overshoot):.1f}° "
+                f"(положение {actual:.0f}°, допустимо "
+                f"{cfg.min_motor_deg:.0f}..{cfg.max_motor_deg:.0f}°)")
+            self.telemetry = Telemetry(
+                target_deg=target, actual_deg=actual, error_deg=error,
+                command_rpm=0, holding=True, raw_counts=raw,
+                passes=self.telemetry.passes + 1)
+            raise DriveFault(self.fault)
+
+        # ── слой 3: ось едет не в ту сторону ──────────────────────────
+        #
+        # Привод работает, а ошибка растёт проход за проходом — значит знак
+        # где-то перевёрнут. Это самый опасный отказ: ось разгоняется в
+        # упор, и с редуктором момент туда приходит умноженный.
+        if last_direction is not None:
+            magnitude = abs(error)
+            if (self._last_abs_error is not None
+                    and magnitude > self._last_abs_error + 0.5):
+                self._worse_passes += 1
+            else:
+                self._worse_passes = 0
+            if self._worse_passes >= cfg.runaway_passes:
+                self.drive.hold()
+                self.fault = (
+                    f"ось уезжает от цели: ошибка росла {self._worse_passes} "
+                    f"проходов подряд и дошла до {magnitude:.0f}°. "
+                    f"Похоже, перевёрнут знак — проверьте invert_encoder "
+                    f"и reverse у этой оси.")
+                raise DriveFault(self.fault)
+            self._last_abs_error = magnitude
+        else:
+            self._last_abs_error = abs(error)
+            self._worse_passes = 0
 
         # Встаём на удержание, только если цель ещё и стоит. Иначе при
         # медленном движении руки ось внутри зоны допуска отпускает привод,
@@ -377,6 +470,7 @@ class MultiAxisFollower:
         self._thread: threading.Thread | None = None
         self.error_text: str | None = None
         self.warning_text: str | None = None
+        self._fault_axis: str | None = None
         self.sweeps = 0
         self.dropped = 0
         self.sweep_ms = 0.0
@@ -409,9 +503,19 @@ class MultiAxisFollower:
                     break
                 try:
                     follower.step()
+                except DriveFault as exc:
+                    # Защита сработала. Связь тут ни при чём, повторять
+                    # нечего: гасим всё и выходим.
+                    self._fault_axis = name
+                    self.error_text = f"ЗАЩИТА, ось {name}: {exc}"
+                    log.error(self.error_text)
+                    break
                 except Exception as exc:
                     failed.append(f"{name}: {exc}")
                     follower.reset_direction()
+
+            if self._fault_axis:
+                break
 
             if failed:
                 consecutive += 1

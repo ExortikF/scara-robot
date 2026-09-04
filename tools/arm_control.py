@@ -777,6 +777,14 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
     означал бы, что либо тихоходная ось перекручивается, либо быстрая не
     успевает за рукой.
     """
+    # Пределы сустава переводятся в градусы вала и уходят в контур как
+    # жёсткая граница. Прижатие цели в ArmAxis — только первый слой; здесь
+    # добавляется проверка фактического положения и направления движения.
+    low = axis.joint_to_motor(axis.min_deg)
+    high = axis.joint_to_motor(axis.max_deg)
+    if low > high:                       # reverse переворачивает и пределы
+        low, high = high, low
+
     config = FollowConfig(
         counts_per_rev=args.cpr,
         invert_encoder=not args.no_invert,
@@ -785,6 +793,10 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
         tolerance_deg=args.tolerance,
         period_s=args.period,
         circular=False,          # ход ограничен, витки различать обязательно
+        min_motor_deg=low,
+        max_motor_deg=high,
+        limit_margin_deg=args.limit_margin,
+        runaway_passes=args.runaway_passes,
     )
     warning = config.check_tolerance()
     if warning:
@@ -990,8 +1002,9 @@ def run_gui(loop, source, axes, arm_filter, args):
         robot_view.update(commanded[0], commanded[1], human_joints)
 
         if loop.error_text:
-            status.config(text=f"ОСТАНОВЛЕНО: {loop.error_text}",
-                          foreground="#e05252")
+            paused["value"] = True
+            pause_button.config(text="ПРОДОЛЖИТЬ")
+            status.config(text=loop.error_text, foreground="#e05252")
         elif loop.warning_text:
             status.config(text=loop.warning_text, foreground="#ffb648")
         elif not zeroed["value"]:
@@ -1139,6 +1152,10 @@ def main() -> int:
                    help="допустимый скачок длины звена за кадр")
     p.add_argument("--max-jump", type=float, default=45.0,
                    help="допустимый скачок угла за кадр, градусы")
+    p.add_argument("--limit-margin", type=float, default=3.0,
+                   help="допустимый перелёт за предел, градусов вала")
+    p.add_argument("--runaway-passes", type=int, default=6,
+                   help="проходов с растущей ошибкой до аварийной остановки")
     p.add_argument("--skip-line-check", action="store_true",
                    help="не проверять шину на шум перед запуском")
     p.add_argument("--no-limits", action="store_true",
@@ -1187,6 +1204,9 @@ def main() -> int:
               f"{axis.gear_text():<22} сустав {axis.limits_text()}")
         print(f"           {'':<11}    это {axis.joint_to_motor(axis.max_deg):+.0f}° "
               f"вала, потолок {axis.max_motor_rpm} об/мин")
+    print()
+    print("защита: цель прижимается к пределам, выход вала за предел и")
+    print("        движение не в ту сторону гасят ОБЕ оси немедленно")
     print()
 
     followers, bus = build_followers(args, axes)
