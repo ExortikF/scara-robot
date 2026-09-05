@@ -587,22 +587,14 @@ class RealSenseFrames:
         self._warn_about_leftovers()
         self._release_daemon()
 
-        # Контекст держим в объекте, а не создаём на месте: если он
-        # соберётся сборщиком мусора, полученные из него устройства
-        # становятся недействительными, и start() отвечает «No device
-        # connected» при том, что query_devices() камеру только что видел.
-        self._context = rs.context()
-        devices = list(self._context.query_devices())
-        if not devices:
-            raise SystemExit(
-                "RealSense не найден. Нужен USB 3 — и кабель, и разъём.")
-        log.info("RealSense: %s", devices[0].get_info(rs.camera_info.name))
-
-        if width and height and fps:
-            modes = [(width, height, fps)]
-        else:
-            log.info("спрашиваю у камеры список режимов...")
-            modes = self._modes_for(devices[0])
+        # Контекст ОБЯЗАН умереть до создания конвейера.
+        #
+        # Пока он жив, устройство числится за ним, а rs.pipeline() заводит
+        # свой контекст и камеру уже не находит: start() отвечает «No
+        # device connected» сразу после того, как query_devices() её
+        # прекрасно видел. Поэтому перечисление вынесено в метод, из
+        # которого наружу выходят одни числа.
+        modes = self._enumerate(width, height, fps)
         log.info("вариантов режима: %d, первым пробую %dx%d@%d",
                  len(modes), *modes[0])
         self.pipeline = None
@@ -622,7 +614,6 @@ class RealSenseFrames:
             # исключительного доступа, которого может не быть.
             log.info("шаг 1: отпускаю интерфейс и пробую снова")
             self._release_daemon(1.5)
-            self._context = self._rs.context()
             if self._try_modes([cached]):
                 log.info("помогло освобождение интерфейса")
                 return
@@ -720,28 +711,32 @@ class RealSenseFrames:
     def _reset_device(self) -> bool:
         """Сбросить камеру и заново её найти.
 
-        Помогает, когда устройство осталось занято незакрытым прошлым
-        запуском: дешевле, чем передёргивать кабель.
+        Контекст живёт только внутри попытки: если он переживёт её,
+        устройство останется за ним и конвейер его не увидит.
         """
+        import gc
+
         rs = self._rs
         for attempt in (1, 2):
             self._release_daemon()
+            context = devices = None
             try:
-                self._context = rs.context()
-                devices = list(self._context.query_devices())
+                context = rs.context()
+                devices = list(context.query_devices())
                 if not devices:
-                    log.warning("камеру не видно после попытки %d", attempt)
+                    log.warning("камеру не видно, попытка %d", attempt)
                     continue
                 devices[0].hardware_reset()
             except Exception as exc:
                 log.warning("сброс, попытка %d: %s", attempt, exc)
                 continue
+            finally:
+                devices = context = None
+                gc.collect()
 
             time.sleep(4.0)          # даёт камере переподключиться
             self._release_daemon()
-            self._context = rs.context()
-            if list(self._context.query_devices()):
-                return True
+            return True
         return False
 
     def _try_modes(self, modes) -> bool:
@@ -788,6 +783,32 @@ class RealSenseFrames:
         return False
 
     # --- выбор режима -----------------------------------------------------
+
+    def _enumerate(self, width: int, height: int, fps: int
+                   ) -> list[tuple[int, int, int]]:
+        """Имя камеры и список режимов, ничего за собой не оставляя."""
+        import gc
+
+        rs = self._rs
+        context = rs.context()
+        devices = list(context.query_devices())
+        if not devices:
+            raise SystemExit(
+                "RealSense не найден. Нужен USB 3 — и кабель, и разъём.")
+
+        log.info("RealSense: %s", devices[0].get_info(rs.camera_info.name))
+        if width and height and fps:
+            modes = [(width, height, fps)]
+        else:
+            log.info("спрашиваю у камеры список режимов...")
+            modes = self._modes_for(devices[0])
+
+        # Ссылки рвём явно и добиваем сборщиком: иначе объекты доживут
+        # как локальные до конца метода, и камера останется занята.
+        devices.clear()
+        del devices, context
+        gc.collect()
+        return modes
 
     def _modes_for(self, device) -> list[tuple[int, int, int]]:
         """Режимы цветного сенсора, от самых подходящих к прочим."""
@@ -865,7 +886,6 @@ class RealSenseFrames:
             log.warning("конвейер RealSense не остановился штатно")
         finally:
             self.pipeline = None
-            self._context = None
 
 
 def open_camera(cv2, index: int):
