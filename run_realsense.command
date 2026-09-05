@@ -35,5 +35,9 @@ echo "сгоняю VDCAssistant с камеры..."
 sudo killall VDCAssistant 2>/dev/null || true
 sleep 1
 
+# Кэш режима пишется из-под root и остаётся с правами root. Если его
+# потом не удаётся перезаписать, подбор каждый раз начинается заново.
+sudo chown "$(id -u)":"$(id -g)" tools/realsense_mode.json 2>/dev/null || true
+
 echo "запускаю (потребуется пароль для sudo)..."
 exec sudo "$PY" tools/arm_control.py --realsense --confirm "$@"

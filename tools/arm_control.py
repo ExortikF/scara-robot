@@ -587,8 +587,13 @@ class RealSenseFrames:
                 "RealSense не найден. Нужен USB 3 — и кабель, и разъём.")
         log.info("RealSense: %s", devices[0].get_info(rs.camera_info.name))
 
-        modes = ([(width, height, fps)] if width and height and fps
-                 else self._modes_for(devices[0]))
+        if width and height and fps:
+            modes = [(width, height, fps)]
+        else:
+            log.info("спрашиваю у камеры список режимов...")
+            modes = self._modes_for(devices[0])
+        log.info("вариантов режима: %d, первым пробую %dx%d@%d",
+                 len(modes), *modes[0])
         self.pipeline = None
         if self._try_modes(modes):
             return
@@ -617,11 +622,18 @@ class RealSenseFrames:
             + "\n".join(self._errors) +
             "\n\nВыньте и вставьте кабель RealSense.")
 
+    #: Сколько ждать первый кадр при подборе режима. Три секунды на
+    #: вариант при десятке вариантов складываются в полминуты молчания, и
+    #: со стороны это неотличимо от зависшей программы. Полутора секунд
+    #: рабочему режиму хватает с запасом: камера отдаёт кадры сразу.
+    PROBE_TIMEOUT_MS = 1500
+
     def _try_modes(self, modes) -> bool:
         """Пройти по режимам, вернуть True на первом, отдавшем кадр."""
         rs = self._rs
         self._errors = []
-        for w, h, f in modes:
+        for number, (w, h, f) in enumerate(modes, 1):
+            log.info("  %d/%d: пробую %dx%d@%d", number, len(modes), w, h, f)
             try:
                 # Конвейер привязываем к тому же контексту, который нашёл
                 # устройство. Со своим собственным он ищет камеру заново и
@@ -636,7 +648,7 @@ class RealSenseFrames:
                 self._errors.append(f"  {w}x{h}@{f}: не стартовал — {exc}")
                 continue
             try:
-                pipeline.wait_for_frames(3000)     # настоящая проверка
+                pipeline.wait_for_frames(self.PROBE_TIMEOUT_MS)
             except Exception as exc:
                 self._errors.append(f"  {w}x{h}@{f}: кадров нет — {exc}")
                 try:
