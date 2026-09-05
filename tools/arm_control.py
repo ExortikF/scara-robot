@@ -601,12 +601,24 @@ class RealSenseFrames:
         if cached and cached in modes:
             if self._try_modes([cached]):
                 return
-            log.warning("режим из прошлого запуска не пошёл — похоже, камера "
-                        "занята. Сбрасываю, не перебирая остальные")
-            self._release_daemon()
+            log.warning("режим из прошлого запуска не пошёл — камера занята")
+
+            # Восстанавливаемся по возрастанию тяжести. Сброс железа —
+            # мера последняя: он занимает секунды и сам требует
+            # исключительного доступа, которого может не быть.
+            log.info("шаг 1: отпускаю интерфейс и пробую снова")
+            self._release_daemon(1.5)
+            self._context = self._rs.context()
+            if self._try_modes([cached]):
+                log.info("помогло освобождение интерфейса")
+                return
+
+            log.info("шаг 2: сброс устройства")
             if self._reset_device() and self._try_modes([cached]):
                 log.info("после сброса открылась на прежнем режиме")
                 return
+
+            log.info("шаг 3: перебираю остальные режимы")
             modes = [m for m in modes if m != cached]
 
         if self._try_modes(modes):
@@ -619,9 +631,17 @@ class RealSenseFrames:
             return
 
         raise SystemExit(
-            "камера не отдала кадр ни на одном режиме, сброс не помог:\n"
+            "\nКАМЕРА НЕ ОТКРЫВАЕТСЯ. Ни один режим не отдал кадр:\n"
             + "\n".join(self._errors) +
-            "\n\nВыньте и вставьте кабель RealSense.")
+            "\n\n«failed to set power state» означает, что RGB-интерфейс\n"
+            "камеры держит система, и отпускать не хочет.\n\n"
+            "Что помогает, по порядку:\n"
+            "  1. вынуть и вставить кабель RealSense — самое надёжное;\n"
+            "  2. закрыть приложения, которые могли брать камеру:\n"
+            "     Photo Booth, FaceTime, Zoom, вкладку браузера с видео;\n"
+            "  3. убедиться, что не остался прошлый запуск:\n"
+            "     pkill -f arm_control.py\n"
+            "  4. кабель и разъём должны быть USB 3.\n")
 
     #: Сколько ждать первый кадр при подборе режима. Три секунды на
     #: вариант при десятке вариантов складываются в полминуты молчания, и
@@ -693,6 +713,14 @@ class RealSenseFrames:
                 pipeline.start(cfg)
             except Exception as exc:
                 self._errors.append(f"  {w}x{h}@{f}: не стартовал — {exc}")
+                # Даже неудавшийся start() оставляет конвейер частично
+                # захватившим устройство. Пока он не отпущен, ни повторная
+                # попытка, ни сброс до камеры не достучатся.
+                try:
+                    pipeline.stop()
+                except Exception:
+                    pass
+                del pipeline
                 continue
             try:
                 pipeline.wait_for_frames(self.PROBE_TIMEOUT_MS)
