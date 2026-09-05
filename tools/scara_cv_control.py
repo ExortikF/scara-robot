@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scara_drive import DriveBus, SerialConfig, TcpConfig
 from scara_drive.discovery import guess_port
+from scara_drive.simulation import SimulatedAxis
 from scara_drive.follow import AngleFollower, FollowConfig, MultiAxisFollower
 
 log = logging.getLogger("scara_cv")
@@ -97,43 +98,6 @@ def load_axes() -> list[AxisSpec]:
         return DEFAULT_AXES
     data = json.loads(AXES_FILE.read_text(encoding="utf-8"))
     return [AxisSpec(**item) for item in data]
-
-
-class SimulatedAxis:
-    """Ось на бумаге: интегрирует заданную скорость."""
-
-    def __init__(self, counts_per_rev: int = 131072, invert: bool = True):
-        self.counts_per_rev = counts_per_rev
-        self.invert = invert
-        self.position = 0
-        self.rpm = 0.0
-        self._last = time.monotonic()
-
-    def _advance(self):
-        now = time.monotonic()
-        dt, self._last = now - self._last, now
-        counts = self.rpm / 60.0 * self.counts_per_rev * dt
-        self.position += int(-counts if self.invert else counts)
-
-    def read_position(self):
-        time.sleep(0.006)          # изображаем время обмена
-        self._advance()
-        return self.position
-
-    def enable(self):
-        pass
-
-    def hold(self):
-        self._advance()
-        self.rpm = 0.0
-
-    def run(self, speed, *, reverse=False):
-        time.sleep(0.006)
-        self._advance()
-        self.rpm = -speed if reverse else speed
-
-    def stop(self):
-        self.hold()
 
 
 class HandSource:

@@ -51,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from scara_drive import DriveBus, SerialConfig, TcpConfig
 from scara_drive.armtrack import ArmFilter, angles_from_points, wrap180
 from scara_drive.discovery import guess_port
+from scara_drive.simulation import SimulatedAxis
 from scara_drive.follow import AngleFollower, FollowConfig, MultiAxisFollower
 
 log = logging.getLogger("arm_control")
@@ -252,33 +253,6 @@ def save_axes(axes: list[ArmAxis]) -> None:
     AXES_FILE.write_text(
         json.dumps([asdict(a) for a in axes], ensure_ascii=False, indent=2),
         encoding="utf-8")
-
-
-class SimulatedAxis:
-    """Ось на бумаге: интегрирует заданную скорость."""
-
-    def __init__(self, counts_per_rev: int = 131072, invert: bool = True):
-        self.counts_per_rev, self.invert = counts_per_rev, invert
-        self.position, self.rpm = 0, 0.0
-        self._last = time.monotonic()
-
-    def _advance(self):
-        now = time.monotonic()
-        dt, self._last = now - self._last, now
-        counts = self.rpm / 60.0 * self.counts_per_rev * dt
-        self.position += int(-counts if self.invert else counts)
-
-    def read_position(self):
-        time.sleep(0.006); self._advance(); return self.position
-
-    def enable(self): pass
-    def hold(self): self._advance(); self.rpm = 0.0
-    def stop(self): self.hold()
-    def release(self): self.hold()
-
-    def run(self, speed, *, reverse=False):
-        time.sleep(0.006); self._advance()
-        self.rpm = -speed if reverse else speed
 
 
 class PoseArmSource:
@@ -999,21 +973,6 @@ def check_speed_mode(bus, axes) -> None:
     return
 
 
-def _unused_strict_mode(wrong) -> None:
-    lines = [f"  привод {a.device_id} ({a.name}): P-004 = {m}" for a, m in wrong]
-    raise SystemExit(
-        "\nПРИВОДЫ НЕ В СКОРОСТНОМ РЕЖИМЕ\n\n"
-        + "\n".join(lines) +
-        "\n\nВ позиционном режиме (P-004 = 0) привод ждёт импульсы на входах\n"
-        "PULS/SIGN, а команды скорости по Modbus игнорирует. Вал будет\n"
-        "стоять, хотя программа работает и приводы отвечают.\n\n"
-        "Исправить:\n"
-        + "\n".join(f"    python examples/mb.py write P-004 1 --id "
-                     f"{a.device_id} --verify" for a, _ in wrong)
-        + "\n\nЗапустить вопреки проверке: --skip-mode-check\n"
-    )
-
-
 def preflight_line(transport: SerialConfig) -> None:
     """Убедиться, что линия молчит, пока молчим мы.
 
@@ -1040,23 +999,6 @@ def preflight_line(transport: SerialConfig) -> None:
         "срываться и подтормаживать. Причины и лечение: "
         "python tools/bus_health.py", noise)
     return
-
-
-def _unused_strict_line(noise: int) -> None:
-    raise SystemExit(
-        f"\nЛИНИЯ ШУМИТ: с молчащей шины пришло {noise} байт за 0.5 с.\n\n"
-        "Работать так нельзя — обмен будет зависать, а приводы поедут по\n"
-        "мусорным показаниям положения.\n\n"
-        "Две обычные причины:\n"
-        "  1. на шине второй ведущий — закройте другие программы с этим\n"
-        "     портом, в том числе C30 Servo GUI;\n"
-        "  2. линия без смещения и терминаторов — подробности:\n"
-        "     python tools/bus_health.py\n\n"
-        "Запустить вопреки проверке: --skip-line-check\n"
-    )
-
-
-CALIBRATION_FILE = Path(__file__).with_name("arm_calibration.json")
 
 
 def load_calibration() -> dict:

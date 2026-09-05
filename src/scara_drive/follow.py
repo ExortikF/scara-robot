@@ -179,7 +179,6 @@ class AngleFollower:
         self._target_rate_deg_s = 0.0
         self._commanded_rpm = 0.0         # что скомандовано сейчас, со знаком
         self._worse_passes = 0            # подряд проходов с растущей ошибкой
-        self._last_abs_error: float | None = None
         self._last_actual: float | None = None
         self._out_passes = 0              # подряд проходов с растущим выходом
         self._last_overshoot: float | None = None
@@ -342,7 +341,6 @@ class AngleFollower:
                 target_deg=target, actual_deg=actual, error_deg=error,
                 command_rpm=0, holding=True, raw_counts=raw,
                 passes=self.telemetry.passes + 1)
-            self._last_abs_error = None
             self._last_actual = None
             self._worse_passes = 0
             self._commanded_rpm = 0.0
@@ -599,7 +597,6 @@ class MultiAxisFollower:
         for follower in self.followers.values():
             follower.fault = None
             follower._worse_passes = 0
-            follower._last_abs_error = None
             follower._last_actual = None
             follower._out_passes = 0
             follower._last_overshoot = None

@@ -31,59 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from scara_drive import DriveConfig, SerialConfig, ServoDrive, TcpConfig
 from scara_drive.discovery import guess_port
+from scara_drive.simulation import SimulatedAxis as SimulatedDrive
 from scara_drive.follow import (AngleFollower, FollowConfig, normalize_360,
                                 shortest_angle_error)
 
 log = logging.getLogger("hand_follow")
-
-
-class SimulatedDrive:
-    """Привод на бумаге: интегрирует заданную скорость.
-
-    Нужен, чтобы проверить контур, вёрстку и поведение на краях диапазона,
-    не трогая железо. Задержку обмена изображает намеренно.
-    """
-
-    def __init__(self, counts_per_rev: int = 131072, invert: bool = True,
-                 latency_s: float = 0.02):
-        self.counts_per_rev = counts_per_rev
-        self.invert = invert
-        self.latency_s = latency_s
-        self.position = 0
-        self.rpm = 0.0
-        self._last = time.monotonic()
-
-    def _advance(self) -> None:
-        now = time.monotonic()
-        dt = now - self._last
-        self._last = now
-        counts = self.rpm / 60.0 * self.counts_per_rev * dt
-        if self.invert:
-            counts = -counts
-        self.position += int(counts)
-
-    def read_position(self) -> int:
-        time.sleep(self.latency_s)
-        self._advance()
-        return self.position
-
-    def enable(self) -> None:
-        pass
-
-    def hold(self) -> None:
-        self._advance()
-        self.rpm = 0.0
-
-    def run(self, speed: int, *, reverse: bool = False) -> None:
-        time.sleep(self.latency_s)
-        self._advance()
-        self.rpm = -speed if reverse else speed
-
-    def stop(self) -> None:
-        self.hold()
-
-    def close(self) -> None:
-        pass
 
 
 class MouseSource:
