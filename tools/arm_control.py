@@ -1439,11 +1439,11 @@ def run_gui(loop, source, axes, arm_filter, args):
     table = ttk.Frame(root)
     table.pack(fill="x", padx=16, pady=10)
     headers = ("ось", "id", "сустав", "цель", "факт", "ошибка", "об/мин",
-               "состояние", "пределы")
+               "угол привода", "состояние", "пределы")
     for column, title in enumerate(headers):
         ttk.Label(table, text=title, font=("SF Pro Text", 11, "bold")).grid(
             row=0, column=column, padx=8, sticky="w")
-    table.grid_columnconfigure(8, weight=1)
+    table.grid_columnconfigure(9, weight=1)
 
     rows = {}
     for index, axis in enumerate(axes, start=1):
@@ -1455,7 +1455,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         labels[0].config(text=axis.name)
         labels[1].config(text=str(axis.device_id))
         labels[2].config(text="плечо" if axis.joint == "q1" else "локоть")
-        labels[8].config(text=axis.limits_text())
+        labels[9].config(text=axis.limits_text())
         rows[axis.name] = labels
 
     status = ttk.Label(root, text="", font=("SF Pro Text", 11))
@@ -1737,18 +1737,25 @@ def run_gui(loop, source, axes, arm_filter, args):
             labels[4].config(text=f"{axis.motor_to_joint(telemetry.actual_deg):7.1f}°")
             labels[5].config(text=f"{axis.motor_to_joint(telemetry.error_deg):+7.1f}°")
             labels[6].config(text=f"{telemetry.command_rpm:+3d}")
+            # Абсолютный угол привода — тот же, что показывает штатная
+            # программа. По нему задаётся механический упор; без него его
+            # пришлось бы подбирать вслепую.
+            absolute = loop.followers[axis.name].absolute_angle(
+                telemetry.raw_counts)
+            labels[7].config(text="—" if absolute is None
+                             else f"{absolute:7.1f}°")
             # Показываем ПРИЧИНУ, а не факт. «Удержание» означало сразу
             # несколько разных вещей, и при ошибке в сотню градусов
             # выглядело поломкой, хотя ось честно стояла на упоре.
             if relaxed["value"]:
-                labels[7].config(text="расслаблена", foreground="#ffb648")
+                labels[8].config(text="расслаблена", foreground="#ffb648")
             elif telemetry.holding:
                 reason = telemetry.hold_reason or "стоит"
-                labels[7].config(
+                labels[8].config(
                     text=reason,
                     foreground="#e05252" if "упор" in reason else "")
             else:
-                labels[7].config(text="едет", foreground="")
+                labels[8].config(text="едет", foreground="")
 
             out = loop.followers[axis.name].out_of_range
             clamped = False
@@ -1764,7 +1771,7 @@ def run_gui(loop, source, axes, arm_filter, args):
                 colour = "#ffb648"
             else:
                 text, colour = axis.limits_text(), ""
-            labels[8].config(text=text, foreground=colour)
+            labels[9].config(text=text, foreground=colour)
             commanded.append(axis.motor_to_joint(telemetry.actual_deg))
 
         robot_view.update(commanded[0], commanded[1], human_joints)
