@@ -23,8 +23,17 @@ if ! "$PY" -c "import pyrealsense2" 2>/dev/null; then
     exit 1
 fi
 
+# Если прошлый запуск завершился неаккуратно, камера остаётся занята,
+# и следующий получает «No device connected». Гасим хвосты заранее.
+if pgrep -f "arm_control.py" >/dev/null 2>&1; then
+    echo "нахожу незакрытый прошлый запуск, останавливаю..."
+    sudo pkill -f "arm_control.py" || true
+    sleep 1
+fi
+
 echo "сгоняю VDCAssistant с камеры..."
 sudo killall VDCAssistant 2>/dev/null || true
+sleep 1
 
 echo "запускаю (потребуется пароль для sudo)..."
 exec sudo "$PY" tools/arm_control.py --realsense --confirm "$@"

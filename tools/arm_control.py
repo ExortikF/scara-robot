@@ -550,6 +550,8 @@ class RealSenseFrames:
         import os
         import subprocess
 
+        self._errors: list[str] = []
+
         try:
             import pyrealsense2 as rs
         except ImportError as exc:
@@ -574,7 +576,12 @@ class RealSenseFrames:
         subprocess.run(["killall", "VDCAssistant"],
                        capture_output=True, check=False)
 
-        devices = list(rs.context().query_devices())
+        # Контекст держим в объекте, а не создаём на месте: если он
+        # соберётся сборщиком мусора, полученные из него устройства
+        # становятся недействительными, и start() отвечает «No device
+        # connected» при том, что query_devices() камеру только что видел.
+        self._context = rs.context()
+        devices = list(self._context.query_devices())
         if not devices:
             raise SystemExit(
                 "RealSense не найден. Нужен USB 3 — и кабель, и разъём.")
@@ -583,22 +590,55 @@ class RealSenseFrames:
         modes = ([(width, height, fps)] if width and height and fps
                  else self._modes_for(devices[0]))
         self.pipeline = None
-        errors = []
+        if self._try_modes(modes):
+            return
+
+        # Устройство осталось занято с прошлого запуска: со стороны это
+        # выглядит как «первый раз работает, дальше нет». Сбрасываем его
+        # и пробуем ещё раз — это дешевле, чем передёргивать кабель.
+        log.warning("камера не отдала кадр ни на одном режиме, "
+                    "сбрасываю устройство")
+        try:
+            devices[0].hardware_reset()
+        except Exception as exc:
+            log.warning("сброс не удался: %s", exc)
+        else:
+            time.sleep(4.0)          # даёт камере переподключиться
+            subprocess.run(["killall", "VDCAssistant"],
+                           capture_output=True, check=False)
+            self._context = rs.context()
+            devices = list(self._context.query_devices())
+            if devices and self._try_modes(modes):
+                log.info("после сброса камера открылась")
+                return
+
+        raise SystemExit(
+            "камера не отдала кадр ни на одном режиме, сброс не помог:\n"
+            + "\n".join(self._errors) +
+            "\n\nВыньте и вставьте кабель RealSense.")
+
+    def _try_modes(self, modes) -> bool:
+        """Пройти по режимам, вернуть True на первом, отдавшем кадр."""
+        rs = self._rs
+        self._errors = []
         for w, h, f in modes:
             try:
-                pipeline = rs.pipeline()
+                # Конвейер привязываем к тому же контексту, который нашёл
+                # устройство. Со своим собственным он ищет камеру заново и
+                # может её не увидеть, если она ещё занята с прошлого раза.
+                pipeline = rs.pipeline(self._context)
                 cfg = rs.config()
                 # Только цвет. Глубину не включаем — она тут не нужна и
                 # съедала бы полосу, из-за которой режим может не пойти.
                 cfg.enable_stream(rs.stream.color, w, h, rs.format.bgr8, f)
                 pipeline.start(cfg)
             except Exception as exc:
-                errors.append(f"  {w}x{h}@{f}: не стартовал — {exc}")
+                self._errors.append(f"  {w}x{h}@{f}: не стартовал — {exc}")
                 continue
             try:
                 pipeline.wait_for_frames(3000)     # настоящая проверка
             except Exception as exc:
-                errors.append(f"  {w}x{h}@{f}: кадров нет — {exc}")
+                self._errors.append(f"  {w}x{h}@{f}: кадров нет — {exc}")
                 try:
                     pipeline.stop()
                 except Exception:
@@ -607,9 +647,8 @@ class RealSenseFrames:
             self.pipeline = pipeline
             self._save_mode(w, h, f)
             log.info("RealSense: цветной поток %dx%d@%d", w, h, f)
-            return
-
-        raise SystemExit("ни один режим не отдал кадр:\n" + "\n".join(errors))
+            return True
+        return False
 
     # --- выбор режима -----------------------------------------------------
 
@@ -676,11 +715,20 @@ class RealSenseFrames:
         return True, np.asanyarray(colour.get_data())
 
     def release(self):
+        """Отпустить камеру.
+
+        Вызывать обязательно: незакрытый конвейер оставляет устройство
+        занятым, и следующий запуск получает «No device connected» при
+        том, что камера в системе видна.
+        """
         try:
             if self.pipeline is not None:
                 self.pipeline.stop()
         except Exception:
-            pass
+            log.warning("конвейер RealSense не остановился штатно")
+        finally:
+            self.pipeline = None
+            self._context = None
 
 
 def open_camera(cv2, index: int):
