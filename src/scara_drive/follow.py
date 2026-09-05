@@ -179,6 +179,12 @@ class Telemetry:
     command_rpm: int = 0
     holding: bool = True
     raw_counts: int = 0
+    #: Почему ось стоит. Пусто, когда едет.
+    #:
+    #: Без этого «удержание» означало сразу несколько разных вещей —
+    #: от «уже на месте» до «упёрлась в дугу» — и отличить их снаружи
+    #: было нельзя даже при ошибке в сотню градусов.
+    hold_reason: str = ""
     passes: int = 0
     period_ms: float = 0.0
     error_text: str | None = None        # фатальная: контур остановлен
@@ -438,6 +444,8 @@ class AngleFollower:
                 self.telemetry = Telemetry(
                     target_deg=target, actual_deg=actual, error_deg=error,
                     command_rpm=0, holding=True, raw_counts=raw,
+                    hold_reason=f"упор {angle:.0f}° вне "
+                                f"{cfg.abs_min_deg:.0f}..{cfg.abs_max_deg:.0f}°",
                     passes=self.telemetry.passes + 1)
                 if not self._arc_reported:
                     self._arc_reported = True
@@ -536,7 +544,7 @@ class AngleFollower:
             self.telemetry = Telemetry(
                 target_deg=target, actual_deg=actual, error_deg=error,
                 command_rpm=0, holding=True, raw_counts=raw,
-                passes=self.telemetry.passes + 1,
+                hold_reason="в допуске", passes=self.telemetry.passes + 1,
             )
             return None
 

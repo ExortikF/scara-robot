@@ -20,7 +20,7 @@
     "max_deg": 180.0,
     "gain": 2.0,
     "max_joint_deg_s": 90.0,
-    "abs_zero_counts": 210160,
+    "abs_zero_counts": null,
     "abs_min_deg": 0.0,
     "abs_max_deg": 296.0
   }

@@ -1672,7 +1672,8 @@ def run_gui(loop, source, axes, arm_filter, args):
                   ("расслаблена" if loop.followers[a.name].relaxed else
                    "запрещено" if not loop.followers[a.name].armed else
                    "упор" if loop.followers[a.name].out_of_range else
-                   "удержание" if loop.followers[a.name].telemetry.holding
+                   (loop.followers[a.name].telemetry.hold_reason or "удержание")
+                   if loop.followers[a.name].telemetry.holding
                    else "едет")
                   for a in axes},
                **{f"обмен_мс": loop.sweep_ms},
@@ -1736,8 +1737,18 @@ def run_gui(loop, source, axes, arm_filter, args):
             labels[4].config(text=f"{axis.motor_to_joint(telemetry.actual_deg):7.1f}°")
             labels[5].config(text=f"{axis.motor_to_joint(telemetry.error_deg):+7.1f}°")
             labels[6].config(text=f"{telemetry.command_rpm:+3d}")
-            labels[7].config(text="расслаблена" if relaxed["value"]
-                             else ("удержание" if telemetry.holding else "едет"))
+            # Показываем ПРИЧИНУ, а не факт. «Удержание» означало сразу
+            # несколько разных вещей, и при ошибке в сотню градусов
+            # выглядело поломкой, хотя ось честно стояла на упоре.
+            if relaxed["value"]:
+                labels[7].config(text="расслаблена", foreground="#ffb648")
+            elif telemetry.holding:
+                reason = telemetry.hold_reason or "стоит"
+                labels[7].config(
+                    text=reason,
+                    foreground="#e05252" if "упор" in reason else "")
+            else:
+                labels[7].config(text="едет", foreground="")
 
             out = loop.followers[axis.name].out_of_range
             clamped = False
