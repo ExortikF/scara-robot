@@ -100,6 +100,10 @@ class FollowConfig:
     abs_min_deg: float = 0.0        # разрешённая дуга, от
     abs_max_deg: float = 360.0      # и до
 
+    #: Сколько проходов можно возвращаться в дугу, прежде чем признать,
+    #: что ось упёрлась и дальше ползти бессмысленно.
+    arc_return_passes: int = 40
+
     #: Сколько проходов подряд ошибка может РАСТИ при работающем приводе,
     #: прежде чем это признаётся движением не в ту сторону. Ловит
     #: перевёрнутый знак энкодера и неверный reverse — то, из-за чего ось
@@ -203,6 +207,8 @@ class AngleFollower:
         self.relaxed = False              # момент снят, вал крутится руками
         self.armed = False                # разрешено ли двигаться
         self.out_of_range = 0.0           # на сколько вал за пределом
+        self._arc_passes = 0              # сколько возвращаемся в дугу
+        self._arc_reported = False
         self._last_target_deg: float | None = None
         self._last_target_time: float | None = None
         self._stop = threading.Event()
@@ -289,22 +295,24 @@ class AngleFollower:
         return (delta % cfg.counts_per_rev) * 360.0 / cfg.counts_per_rev
 
     def outside_arc(self, raw: int) -> str | None:
-        """С какой стороны вышли за разрешённую дугу. None — внутри."""
+        """С какой стороны вышли за разрешённую дугу. None — внутри.
+
+        Края считаются линейно, БЕЗ обхода через ноль. Это принципиально:
+        сначала здесь искался ближайший край по окружности, и при угле
+        350° ближе оказывался нижний край 0°. Ось послушно ехала вверх,
+        через 360° попадала внутрь дуги, тут же выезжала снова — и так
+        бесконечно, медленно вращаясь в одну сторону. У оси с упорами
+        дороги через ноль нет, и делать вид, что есть, нельзя.
+        """
         angle = self.absolute_angle(raw)
         if angle is None:
             return None
         cfg = self.config
-        low, high = cfg.abs_min_deg, cfg.abs_max_deg
-        if low <= high:
-            inside = low <= angle <= high
-        else:                        # дуга через ноль, например 300..60
-            inside = angle >= low or angle <= high
-        if inside:
-            return None
-        # Ближе к какому краю — туда и возвращаться.
-        to_low = min(abs(angle - low), 360 - abs(angle - low))
-        to_high = min(abs(angle - high), 360 - abs(angle - high))
-        return "low" if to_low < to_high else "high"
+        if angle > cfg.abs_max_deg:
+            return "high"
+        if angle < cfg.abs_min_deg:
+            return "low"
+        return None
 
     def counts_to_degrees(self, raw: int) -> float:
         """Импульсы энкодера -> градусы вала, от программного нуля.
@@ -420,7 +428,30 @@ class AngleFollower:
             want_increase = (side == "low")      # ушли ниже нижнего края
             reverse = (want_increase != (angle_per_forward > 0))
 
+            # Возврат не должен длиться вечно. Если за столько проходов
+            # ось не вернулась, значит она едет не туда или упёрлась в
+            # железо — тогда честнее встать, чем ползти без конца.
+            self._arc_passes += 1
+            if self._arc_passes > cfg.arc_return_passes:
+                self.drive.hold()
+                self._commanded_rpm = 0.0
+                self.telemetry = Telemetry(
+                    target_deg=target, actual_deg=actual, error_deg=error,
+                    command_rpm=0, holding=True, raw_counts=raw,
+                    passes=self.telemetry.passes + 1)
+                if not self._arc_reported:
+                    self._arc_reported = True
+                    log.warning("ось стоит на упоре: %.1f° по шкале "
+                                "привода, разрешено %.0f..%.0f°",
+                                angle, cfg.abs_min_deg, cfg.abs_max_deg)
+                return None
+
             self.drive.run(cfg.min_rpm, reverse=reverse)
+            # Пока возвращаемся в дугу, защита от уезда молчит: движение
+            # к упору она справедливо считает уездом от цели, и без этого
+            # сброса контур вставал целиком.
+            self._worse_passes = 0
+            self._last_actual = None
             self.telemetry = Telemetry(
                 target_deg=target, actual_deg=actual, error_deg=error,
                 command_rpm=-cfg.min_rpm if reverse else cfg.min_rpm,
@@ -462,6 +493,8 @@ class AngleFollower:
             self.out_of_range = 0.0
             self._out_passes = 0
             self._last_overshoot = None
+            self._arc_passes = 0
+            self._arc_reported = False
 
         # ── слой 3: вал идёт не туда, куда скомандовано ───────────────
         #
