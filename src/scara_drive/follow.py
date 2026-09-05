@@ -691,6 +691,16 @@ class MultiAxisFollower:
         self.dropped = 0
         self.sweep_ms = 0.0
 
+    def ensure_running(self) -> None:
+        """Поднять поток контура, если он остановлен.
+
+        Нужен, потому что «стоп» и авария поток гасят, а продолжить работу
+        после них человек вправе, не перезапуская программу.
+        """
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = None
+            self.start()
+
     def clear_fault(self) -> bool:
         """Снять аварию и снова запустить контур.
 

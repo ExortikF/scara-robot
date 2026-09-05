@@ -1459,6 +1459,9 @@ def run_gui(loop, source, axes, arm_filter, args):
             return
         paused["value"] = not paused["value"]
         pause_button.config(text="ПРОДОЛЖИТЬ" if paused["value"] else "ПАУЗА")
+        if not paused["value"]:
+            # Поток мог быть погашен «стопом» или аварией — поднимаем.
+            loop.ensure_running()
         # Движение разрешено ровно тогда, когда снята пауза. Раньше контур
         # правил положение всегда, и ось могла поехать сама.
         loop.set_armed(not paused["value"])
@@ -1468,10 +1471,20 @@ def run_gui(loop, source, axes, arm_filter, args):
             loop.freeze()
 
     def emergency_stop():
+        """Остановить движение, но не убивать программу.
+
+        Раньше здесь гасился поток контура, и поднять его было нечем —
+        после «стопа» приходилось перезапускать всё приложение. Теперь
+        движение просто запрещается, а оси встают там, где стоят.
+        """
         paused["value"] = True
-        loop.stop()
+        relaxed["value"] = False
+        loop.set_armed(False)
+        loop.freeze()
         pause_button.config(text="ПРОДОЛЖИТЬ")
-        status.config(text="ОСТАНОВЛЕНО кнопкой. Перезапустите приложение.",
+        relax_button.config(text="РАССЛАБИТЬ")
+        status.config(text="ОСТАНОВЛЕНО. Оси стоят под током. "
+                           "«ПРОДОЛЖИТЬ» — снова поехать.",
                       foreground="#e05252")
 
     def toggle_diag():
@@ -1574,9 +1587,39 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1,
              "last_target_ms": 0.0}
+
+    started_at = time.monotonic()
+    journal = journal_file = None
+    if args.record:
+        import csv
+        journal_file = open(args.record, "w", newline="", encoding="utf-8")
+        columns = ["t", "событие", "рука_q1", "рука_q2", "отн_q1", "отн_q2"]
+        for axis in axes:
+            short = axis.name.split()[0]
+            columns += [f"вал_{short}", f"сустав_{short}"]
+        journal = csv.DictWriter(journal_file, fieldnames=columns,
+                                 extrasaction="ignore")
+        journal.writeheader()
+        log.info("пишу журнал в %s", args.record)
     zeroed = {"value": False}
     relaxed = {"value": False}
     show_diag = {"value": False}
+
+    def record(kind: str, **fields) -> None:
+        """Записать строку в журнал, если он включён.
+
+        Журнал нужен ровно для того, чтобы спорные вещи вроде «ноль
+        уплывает» и «иногда перебегает» разбирать по числам. По памяти и
+        на глаз такие вещи не ловятся: они редкие и накапливаются.
+        """
+        if journal is None:
+            return
+        journal.writerow({
+            "t": f"{time.monotonic() - started_at:.3f}",
+            "событие": kind,
+            **{k: (f"{v:.3f}" if isinstance(v, float) else v)
+               for k, v in fields.items()},
+        })
 
     def on_target(smoothed):
         """Вызывается из потока распознавания."""
@@ -1590,6 +1633,13 @@ def run_gui(loop, source, axes, arm_filter, args):
                 relative[0] if axis.joint == "q1" else relative[1])
             for axis in axes
         })
+        record("цель", рука_q1=smoothed[0], рука_q2=smoothed[1],
+               отн_q1=relative[0], отн_q2=relative[1],
+               **{f"вал_{a.name.split()[0]}": loop.followers[a.name].telemetry.actual_deg
+                  for a in axes},
+               **{f"сустав_{a.name.split()[0]}":
+                  a.motor_to_joint(loop.followers[a.name].telemetry.actual_deg)
+                  for a in axes})
 
     worker = VisionWorker(source, arm_filter, on_target)
 
@@ -1707,6 +1757,9 @@ def run_gui(loop, source, axes, arm_filter, args):
             foreground="#e05252" if errors else "#888")
 
     def shutdown():
+        if journal_file is not None:
+            journal_file.close()
+            log.info("журнал закрыт: %s", args.record)
         worker.stop()
         try:
             loop.set_relaxed(True)      # не оставляем оси под током
@@ -1839,6 +1892,8 @@ def main() -> int:
                         "веб-камеры; нужен sudo и питон из arm_realsense")
     p.add_argument("--list-cameras", action="store_true",
                    help="показать доступные камеры и выйти")
+    p.add_argument("--record", metavar="ФАЙЛ.csv",
+                   help="писать журнал: цель, положение осей, время")
     p.add_argument("--median", type=int, default=3,
                    help="кадров в медианном окне; гасит срывы точек")
     p.add_argument("--min-cutoff", type=float, default=1.0,
