@@ -267,7 +267,8 @@ class PoseArmSource:
     MIN_VISIBILITY = 0.5
 
     def __init__(self, camera_index: int = 0, side: str = "right",
-                 model_path: Path | None = None, realsense: bool = False):
+                 model_path: Path | None = None, realsense: bool = False,
+                 allow_reset: bool = False):
         try:
             import cv2
             import mediapipe as mp
@@ -300,7 +301,7 @@ class PoseArmSource:
             min_tracking_confidence=0.5,
         )
         self._landmarker = vision.PoseLandmarker.create_from_options(options)
-        self._capture = (RealSenseFrames() if realsense
+        self._capture = (RealSenseFrames(allow_reset=allow_reset) if realsense
                          else open_camera(cv2, camera_index))
         self._start = time.monotonic()
         self.last_frame = None
@@ -376,7 +377,8 @@ class MarkerArmSource:
     }
     MIN_AREA_PX = 60
 
-    def __init__(self, camera_index: int = 0, realsense: bool = False):
+    def __init__(self, camera_index: int = 0, realsense: bool = False,
+                 allow_reset: bool = False):
         try:
             import cv2
             import numpy as np
@@ -391,7 +393,7 @@ class MarkerArmSource:
             log.info("создан %s — цвета меток правьте там", self.CONFIG.name)
         self.ranges = json.loads(self.CONFIG.read_text(encoding="utf-8"))
 
-        self._capture = (RealSenseFrames() if realsense
+        self._capture = (RealSenseFrames(allow_reset=allow_reset) if realsense
                          else open_camera(cv2, camera_index))
         self.last_frame = None
         self.last_points = None
@@ -546,9 +548,20 @@ class RealSenseFrames:
 
     MODE_CACHE = Path(__file__).with_name("realsense_mode.json")
 
-    def __init__(self, width: int = 0, height: int = 0, fps: int = 0):
+    def __init__(self, width: int = 0, height: int = 0, fps: int = 0,
+                 allow_reset: bool = False):
+        """
+        ``allow_reset`` — разрешить hardware_reset при неудаче.
+
+        По умолчанию выключен намеренно. Сброс отключает устройство от
+        шины и ждёт, что оно поднимется само, а поднимается оно не всегда:
+        на этой машине камера после сброса пропадала из системы совсем, и
+        вернуть её можно было только кабелем. Лекарство вышло опаснее
+        болезни, поэтому теперь только по явной просьбе.
+        """
         import os
 
+        self._allow_reset = allow_reset
         self._errors: list[str] = []
 
         try:
@@ -614,12 +627,13 @@ class RealSenseFrames:
                 log.info("помогло освобождение интерфейса")
                 return
 
-            log.info("шаг 2: сброс устройства")
-            if self._reset_device() and self._try_modes([cached]):
-                log.info("после сброса открылась на прежнем режиме")
-                return
+            if self._allow_reset:
+                log.info("шаг 2: сброс устройства")
+                if self._reset_device() and self._try_modes([cached]):
+                    log.info("после сброса открылась на прежнем режиме")
+                    return
 
-            log.info("шаг 3: перебираю остальные режимы")
+            log.info("шаг 2: перебираю остальные режимы")
             modes = [m for m in modes if m != cached]
 
         if self._try_modes(modes):
@@ -627,7 +641,7 @@ class RealSenseFrames:
 
         log.warning("камера не отдала кадр ни на одном режиме, "
                     "сбрасываю устройство")
-        if self._reset_device() and self._try_modes(modes):
+        if self._allow_reset and self._reset_device() and self._try_modes(modes):
             log.info("после сброса камера открылась")
             return
 
@@ -642,7 +656,10 @@ class RealSenseFrames:
             "     Photo Booth, FaceTime, Zoom, вкладку браузера с видео;\n"
             "  3. убедиться, что не остался прошлый запуск:\n"
             "     pkill -f arm_control.py\n"
-            "  4. кабель и разъём должны быть USB 3.\n")
+            "  4. кабель и разъём должны быть USB 3.\n\n"
+            "Проверить, видит ли камеру система:\n"
+            "    system_profiler SPCameraDataType | grep -i realsense\n"
+            "Если пусто — камера отвалилась от USB, поможет только кабель.\n")
 
     #: Сколько ждать первый кадр при подборе режима. Три секунды на
     #: вариант при десятке вариантов складываются в полминуты молчания, и
@@ -1783,6 +1800,9 @@ def main() -> int:
     p.add_argument("--sweep", type=float, default=0.12)
     p.add_argument("--camera", type=int, default=0,
                    help="номер обычной камеры")
+    p.add_argument("--allow-camera-reset", action="store_true",
+                   help="разрешить сброс камеры при неудаче; она может "
+                        "не вернуться и потребовать переподключения кабеля")
     p.add_argument("--realsense", action="store_true",
                    help="брать кадры с RealSense через SDK, а не как с "
                         "веб-камеры; нужен sudo и питон из arm_realsense")
@@ -1870,9 +1890,11 @@ def main() -> int:
 
     if args.diag:
         source = (PoseArmSource(args.camera, args.side,
-                                realsense=args.realsense)
+                                realsense=args.realsense,
+                                allow_reset=args.allow_camera_reset)
                   if args.source == "pose"
-                  else MarkerArmSource(args.camera, realsense=args.realsense))
+                  else MarkerArmSource(args.camera, realsense=args.realsense,
+                                allow_reset=args.allow_camera_reset))
         source.MIN_VISIBILITY = args.min_visibility
         arm_filter = ArmFilter(smoothing=args.smoothing,
                                max_len_change=float("inf"),
@@ -1928,9 +1950,11 @@ def main() -> int:
                 finally:
                     bus.close()
 
-    source = (PoseArmSource(args.camera, args.side, realsense=args.realsense)
+    source = (PoseArmSource(args.camera, args.side, realsense=args.realsense,
+                                allow_reset=args.allow_camera_reset)
               if args.source == "pose"
-              else MarkerArmSource(args.camera, realsense=args.realsense))
+              else MarkerArmSource(args.camera, realsense=args.realsense,
+                                allow_reset=args.allow_camera_reset))
     source.MIN_VISIBILITY = args.min_visibility
     # Отсев кадров убран: он резал нормальные движения, а картина
     # «скелет на экране есть, а робот стоит» разбиралась дольше, чем
