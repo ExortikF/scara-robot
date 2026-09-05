@@ -96,6 +96,15 @@ class VoiceCommands:
         self.heard = 0
         self.last = ""
 
+        # Состояние наружу: без него «не работает» неотличимо от «не
+        # услышал», а под sudo микрофон отказывает молча — macOS выдаёт
+        # доступ приложению, и от имени root запрос уходит мимо него.
+        self.status = "запуск"
+        self.error: str | None = None
+        self.last_heard: str | None = None
+        self.last_heard_at: float = 0.0
+        self.level = 0.0            # текущий уровень звука
+
     # --- разбор ----------------------------------------------------------
 
     @staticmethod
@@ -128,6 +137,7 @@ class VoiceCommands:
         if not samples:
             return True
         level = sum(abs(s) for s in samples) / len(samples)
+        self.level = level
         return level < self.silence_level
 
     # --- поток -----------------------------------------------------------
@@ -145,6 +155,7 @@ class VoiceCommands:
                     samplerate=self.SAMPLE_RATE, blocksize=4000,
                     device=self.device, dtype="int16", channels=1,
                     callback=self._feed):
+                self.status = "слушаю"
                 log.info("слушаю голос: старт, стоп, нули")
                 while not self._stop.is_set():
                     try:
@@ -168,6 +179,9 @@ class VoiceCommands:
                     if command and command != self.last:
                         self.last = command
                         self.heard += 1
+                        import time as _time
+                        self.last_heard = command
+                        self.last_heard_at = _time.monotonic()
                         log.info("услышано: %s", command)
                         try:
                             self.on_command(command)
@@ -176,7 +190,12 @@ class VoiceCommands:
                     elif not command:
                         self.last = ""      # готовы услышать ту же снова
         except Exception as exc:
+            self.status = "нет доступа"
+            self.error = str(exc)
             log.error("микрофон недоступен: %s", exc)
+            log.error("под sudo macOS часто не отдаёт микрофон: доступ "
+                      "выдаётся приложению, а не root. Проверить: "
+                      "python tools/mics.py --listen 5")
 
     def start(self) -> None:
         self._stop.clear()

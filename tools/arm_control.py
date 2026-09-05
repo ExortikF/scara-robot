@@ -39,6 +39,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 import threading
 import time
@@ -1442,6 +1443,8 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     status = ttk.Label(root, text="", font=("SF Pro Text", 11))
     status.pack(pady=(0, 4))
+    voice_label = ttk.Label(root, text="", font=("SF Pro Text", 12, "bold"))
+    voice_label.pack(pady=(0, 4))
     detector = ttk.Label(root, text="", font=("SF Pro Text", 11),
                          foreground="#888")
     # Появляется по кнопке «диагностика», а не постоянно.
@@ -1767,6 +1770,28 @@ def run_gui(loop, source, axes, arm_filter, args):
             status.config(text=f"ведём   обход шины {loop.sweep_ms:.0f} мс   "
                                f"всего {loop.sweeps}", foreground="")
 
+        # Голос: слышно ли вообще, и что услышано последним. Без этого
+        # «не работает» неотличимо от «не расслышал».
+        if voice is None:
+            voice_label.config(text="голос выключен", foreground="#666")
+        elif voice.status == "нет доступа":
+            voice_label.config(
+                text=f"МИКРОФОН НЕДОСТУПЕН — {voice.error or ''}",
+                foreground="#e05252")
+        else:
+            since = time.monotonic() - voice.last_heard_at
+            if voice.last_heard and since < 3.0:
+                voice_label.config(text=f"услышано: {voice.last_heard.upper()}",
+                                   foreground="#3ddc84")
+            else:
+                bar = "▁▂▃▄▅▆▇█"
+                filled = min(len(bar) - 1,
+                             int(voice.level / max(args.voice_level, 1) * 4))
+                voice_label.config(
+                    text=f"голос {voice.status}  {bar[filled]}  "
+                         f"команд {voice.heard}",
+                    foreground="#888")
+
         if not show_diag["value"]:
             return
         note = source.funnel.last_loss or source.note
@@ -1794,6 +1819,11 @@ def run_gui(loop, source, axes, arm_filter, args):
             root.after(0, action)
 
     voice = None
+    if not args.no_voice and os.environ.get("SUDO_LAUNCH"):
+        log.warning("запуск под sudo: микрофон macOS обычно не отдаёт "
+                    "процессу от root. Если голос не заработает, "
+                    "запускайте без --realsense и без sudo, либо "
+                    "пользуйтесь кнопками")
     if not args.no_voice:
         try:
             from scara_drive.voice import VoiceCommands

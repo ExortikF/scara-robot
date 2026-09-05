@@ -47,4 +47,9 @@ sleep 1
 sudo chown "$(id -u)":"$(id -g)" tools/realsense_mode.json 2>/dev/null || true
 
 echo "запускаю (потребуется пароль для sudo)..."
-exec sudo "$PY" tools/arm_control.py --realsense --confirm "$@"
+
+# Микрофон под sudo обычно недоступен: macOS выдаёт доступ приложению, а
+# от имени root запрос уходит мимо разрешения и отказывает молча. Камере
+# root необходим, микрофону он мешает — поэтому передаём наружу, чтобы
+# программа могла сказать об этом внятно, а не молчать.
+exec sudo SUDO_LAUNCH=1 "$PY" tools/arm_control.py --realsense --confirm "$@"
