@@ -83,6 +83,23 @@ class FollowConfig:
     #: задания скорости, и авария срабатывала бы на каждом подходе к краю.
     limit_margin_deg: float = 3.0
 
+    # ═══ МЕХАНИЧЕСКИЙ УПОР ═══
+    #
+    # Пределы выше отсчитываются от программного нуля и уезжают вместе с
+    # ним при каждой новой калибровке середины. Для настоящего упора это
+    # не годится: он привязан к механике и не должен зависеть от того,
+    # где мы сегодня поставили середину.
+    #
+    # Поэтому здесь отдельная шкала — абсолютный угол привода 0..360°,
+    # тот самый, что показывает штатная программа. Он считается прямо из
+    # импульсов энкодера и от наших калибровок не зависит вовсе.
+
+    #: Ноль абсолютной шкалы в импульсах. None — упор не задан.
+    abs_zero_counts: int | None = None
+    abs_invert: bool = True         # как в штатной программе
+    abs_min_deg: float = 0.0        # разрешённая дуга, от
+    abs_max_deg: float = 360.0      # и до
+
     #: Сколько проходов подряд ошибка может РАСТИ при работающем приводе,
     #: прежде чем это признаётся движением не в ту сторону. Ловит
     #: перевёрнутый знак энкодера и неверный reverse — то, из-за чего ось
@@ -257,6 +274,38 @@ class AngleFollower:
 
     # --- положение --------------------------------------------------------
 
+    def absolute_angle(self, raw: int) -> float | None:
+        """Угол привода 0..360° — тот же, что показывает штатная программа.
+
+        Считается из импульсов и своего нуля, поэтому не зависит ни от
+        нашей середины, ни от того, сколько оборотов накрутили.
+        """
+        cfg = self.config
+        if cfg.abs_zero_counts is None:
+            return None
+        delta = raw - cfg.abs_zero_counts
+        if cfg.abs_invert:
+            delta = -delta
+        return (delta % cfg.counts_per_rev) * 360.0 / cfg.counts_per_rev
+
+    def outside_arc(self, raw: int) -> str | None:
+        """С какой стороны вышли за разрешённую дугу. None — внутри."""
+        angle = self.absolute_angle(raw)
+        if angle is None:
+            return None
+        cfg = self.config
+        low, high = cfg.abs_min_deg, cfg.abs_max_deg
+        if low <= high:
+            inside = low <= angle <= high
+        else:                        # дуга через ноль, например 300..60
+            inside = angle >= low or angle <= high
+        if inside:
+            return None
+        # Ближе к какому краю — туда и возвращаться.
+        to_low = min(abs(angle - low), 360 - abs(angle - low))
+        to_high = min(abs(angle - high), 360 - abs(angle - high))
+        return "low" if to_low < to_high else "high"
+
     def counts_to_degrees(self, raw: int) -> float:
         """Импульсы энкодера -> градусы вала, от программного нуля.
 
@@ -352,6 +401,33 @@ class AngleFollower:
         #
         # Сюда попадаем, если ось перелетела край или уехала не туда.
         # Дальше двигать нельзя ни в каком случае: гасим и поднимаем аварию.
+        # Механический упор проверяется первым: он важнее программных
+        # пределов, потому что за ним железо, а не настройка.
+        side = self.outside_arc(raw)
+        if side is not None:
+            angle = self.absolute_angle(raw)
+            edge = (cfg.abs_min_deg if side == "low" else cfg.abs_max_deg)
+            self.out_of_range = min(abs(angle - edge), 360 - abs(angle - edge))
+            # Куда ехать, чтобы вернуться в дугу.
+            #
+            # Направление зависит сразу от двух инверсий, и угадывать тут
+            # нельзя: команда «вперёд» меняет счётчик энкодера в одну
+            # сторону (invert_encoder), а абсолютная шкала считается от
+            # счётчика с собственным знаком (abs_invert). Выводим явно.
+            raw_per_forward = -1 if cfg.invert_encoder else 1
+            angle_per_forward = (-raw_per_forward if cfg.abs_invert
+                                 else raw_per_forward)
+            want_increase = (side == "low")      # ушли ниже нижнего края
+            reverse = (want_increase != (angle_per_forward > 0))
+
+            self.drive.run(cfg.min_rpm, reverse=reverse)
+            self.telemetry = Telemetry(
+                target_deg=target, actual_deg=actual, error_deg=error,
+                command_rpm=-cfg.min_rpm if reverse else cfg.min_rpm,
+                holding=False, raw_counts=raw,
+                passes=self.telemetry.passes + 1)
+            return "reverse" if reverse else "forward"
+
         overshoot = self.beyond_limit(actual)
         if overshoot:
             # Ось за пределом. Глухо запрещать движение нельзя: тогда из

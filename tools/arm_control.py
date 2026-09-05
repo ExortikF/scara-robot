@@ -129,6 +129,13 @@ class ArmAxis:
     min_deg: float = -100.0       # предел сустава от середины
     max_deg: float = 100.0
     gain: float = 1.0             # во сколько раз повторять движение руки
+
+    #: Механический упор в абсолютной шкале привода 0..360° — той самой,
+    #: что показывает штатная программа. Привязан к железу и не съезжает
+    #: при смене середины. None означает «упора нет».
+    abs_zero_counts: int | None = None
+    abs_min_deg: float = 0.0
+    abs_max_deg: float = 360.0
     max_joint_deg_s: float = 60.0 # потолок скорости сустава
 
     def __post_init__(self) -> None:
@@ -1315,6 +1322,9 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
         circular=False,          # ход ограничен, витки различать обязательно
         min_motor_deg=low,
         max_motor_deg=high,
+        abs_zero_counts=axis.abs_zero_counts,
+        abs_min_deg=axis.abs_min_deg,
+        abs_max_deg=axis.abs_max_deg,
         limit_margin_deg=args.limit_margin,
         runaway_passes=args.runaway_passes,
     )
@@ -1960,6 +1970,10 @@ def main() -> int:
         raised = "  (поднят: ниже ось рыскала бы)" if (
             tol > args.tolerance * abs(axis.gear_ratio) + 1e-6) else ""
         cfg = axis_config(args, axis)
+        if axis.abs_zero_counts is not None:
+            print(f"  упор {axis.name}: разрешена дуга "
+                  f"{axis.abs_min_deg:.0f}..{axis.abs_max_deg:.0f}° "
+                  f"по шкале привода (ноль {axis.abs_zero_counts})")
         print(f"  допуск {axis.name}: "
               f"{abs(axis.motor_to_joint(tol)):.2f}° сустава{raised}"
               f",  разгон {cfg.max_rpm_step:.1f} об/мин за проход")
