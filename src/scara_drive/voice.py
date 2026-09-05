@@ -35,11 +35,24 @@ COMMANDS = {
 #: должен останов.
 PRIORITY = ("стоп", "старт", "линия")
 
-#: Ниже этой уверенности слово не принимается за команду.
+#: Порог уверенности СВОЙ у каждой команды: цена ошибки у них разная.
 #:
-#: Модель маленькая и в шуме мастерской охотно «слышит» команды там, где
-#: их нет. Ложный «старт» опаснее пропущенного: робот трогается сам.
-MIN_CONFIDENCE = 0.75
+#: Ложный «стоп» ничего не портит — робот просто встанет, и человек
+#: скажет «старт». Поэтому порог низкий: лучше лишний раз остановиться,
+#: чем не расслышать команду, когда она нужна.
+#:
+#: Ложный «старт» трогает робота с места, когда его никто не звал.
+#: Порог высокий: пропустить команду не страшно, повторить её человек
+#: успеет, а неожиданное движение — уже происшествие.
+#:
+#: Ложная «линия» переопределяет середину и портит настройку — тоже
+#: неприятно, но не опасно.
+CONFIDENCE = {
+    "стоп": 0.35,
+    "старт": 0.90,
+    "линия": 0.80,
+}
+DEFAULT_CONFIDENCE = 0.75
 
 #: На частичном результате принимается только останов. Частичные
 #: неустойчивы — слово может смениться следующим куском, — но ждать
@@ -121,7 +134,7 @@ class VoiceCommands:
         self.level = 0.0            # текущий уровень звука
         self.rejected = 0           # отброшено по слабой уверенности
         self.last_confidence = 0.0
-        self.min_confidence = MIN_CONFIDENCE
+        self.bias = 0.0             # общий сдвиг всех порогов
 
     # --- разбор ----------------------------------------------------------
 
@@ -158,6 +171,20 @@ class VoiceCommands:
         self.level = level
         return level < self.silence_level
 
+    def threshold(self, command: str) -> float:
+        """Порог для конкретной команды с учётом общей поправки.
+
+        ``bias`` сдвигает все пороги разом: если в вашей мастерской шумно
+        или наоборот тихо, подкручивать удобнее одной ручкой, не ломая
+        соотношение между командами.
+
+        >>> v = object.__new__(VoiceCommands); v.bias = 0.0
+        >>> v.threshold("стоп") < v.threshold("старт")
+        True
+        """
+        base = CONFIDENCE.get(command, DEFAULT_CONFIDENCE)
+        return min(0.99, max(0.05, base + self.bias))
+
     def _confident(self, result: dict, command: str) -> bool:
         """Достаточно ли уверенно распознано слово команды."""
         words = result.get("result") or []
@@ -168,7 +195,7 @@ class VoiceCommands:
             return True          # разбора по словам нет — верим тексту
         best = max(scores)
         self.last_confidence = best
-        return best >= self.min_confidence
+        return best >= self.threshold(command)
 
     # --- поток -----------------------------------------------------------
 
@@ -215,7 +242,9 @@ class VoiceCommands:
                         continue        # ждём окончательного результата
                     if command and final and not self._confident(result, command):
                         self.rejected += 1
-                        log.debug("«%s» отброшено: слабая уверенность", command)
+                        log.info("«%s» отброшено: уверенность %.2f, нужно "
+                                 "%.2f", command, self.last_confidence,
+                                 self.threshold(command))
                         continue
 
                     if command and command != self.last:

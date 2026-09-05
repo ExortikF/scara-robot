@@ -1865,7 +1865,7 @@ def run_gui(loop, source, axes, arm_filter, args):
             from scara_drive.voice import VoiceCommands
             voice = VoiceCommands(on_voice, device=args.audio_device,
                                   silence_level=args.voice_level)
-            voice.min_confidence = args.voice_confidence
+            voice.bias = args.voice_bias
             voice.start()
         except SystemExit as exc:
             log.warning("голосовые команды выключены: %s",
@@ -2014,8 +2014,9 @@ def main() -> int:
                    help="выключить голосовые команды")
     p.add_argument("--audio-device", type=int, default=0,
                    help="номер микрофона; список — tools/mics.py")
-    p.add_argument("--voice-confidence", type=float, default=0.75,
-                   help="ниже этой уверенности слово не считается командой")
+    p.add_argument("--voice-bias", type=float, default=0.0,
+                   help="сдвиг порогов распознавания: минус — принимать "
+                        "охотнее, плюс — строже")
     p.add_argument("--voice-level", type=int, default=300,
                    help="порог тишины: ниже него звук не распознаётся")
     p.add_argument("--record", metavar="ФАЙЛ.csv",
