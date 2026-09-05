@@ -7,7 +7,7 @@
     "reverse": false,
     "min_deg": -100.0,
     "max_deg": 100.0,
-    "gain": 1.0,
+    "gain": 0.7,
     "max_joint_deg_s": 90.0
   },
   {
@@ -18,7 +18,7 @@
     "reverse": true,
     "min_deg": -100.0,
     "max_deg": 100.0,
-    "gain": 1.5,
+    "gain": 2.0,
     "max_joint_deg_s": 90.0
   }
 ]
