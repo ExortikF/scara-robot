@@ -1402,7 +1402,9 @@ def run_gui(loop, source, axes, arm_filter, args):
               text="камера сверху: плечо -> J1, локоть -> J2").pack(pady=(12, 2))
     ttk.Label(root, font=("SF Pro Text", 11), foreground="#888",
               text="сначала убедитесь, что скелет лёг на руку правильно, "
-                   "потом «ноль здесь» и снимайте паузу").pack(pady=(0, 8))
+                   "потом «ноль здесь» и снимайте паузу").pack(pady=(0, 2))
+    ttk.Label(root, font=("SF Pro Text", 11), foreground="#888",
+              text="голосом: «старт» · «стоп» · «нули»").pack(pady=(0, 8))
 
     middle = ttk.Frame(root)
     middle.pack(fill="both", expand=True, padx=14)
@@ -1777,7 +1779,34 @@ def run_gui(loop, source, axes, arm_filter, args):
                  f"{source.funnel.report()}   |   {note}{tail}",
             foreground="#e05252" if errors else "#888")
 
+    def on_voice(command: str) -> None:
+        """Голосовая команда. Приходит из потока распознавания.
+
+        Сам обработчик ничего не делает: он передаёт вызов в поток окна
+        через root.after. Трогать интерфейс Tk из чужого потока нельзя —
+        он от этого падает не сразу, а позже и в непонятном месте.
+        """
+        actions = {"стоп": emergency_stop,
+                   "старт": lambda: (toggle_pause() if paused["value"] else None),
+                   "нули": set_middle}
+        action = actions.get(command)
+        if action is not None:
+            root.after(0, action)
+
+    voice = None
+    if not args.no_voice:
+        try:
+            from scara_drive.voice import VoiceCommands
+            voice = VoiceCommands(on_voice, device=args.audio_device)
+            voice.start()
+        except SystemExit as exc:
+            log.warning("голосовые команды выключены: %s",
+                        str(exc).splitlines()[0])
+            voice = None
+
     def shutdown():
+        if voice is not None:
+            voice.stop()
         if journal_file is not None:
             journal_file.close()
             log.info("журнал закрыт: %s", record_path)
@@ -1913,6 +1942,10 @@ def main() -> int:
                         "веб-камеры; нужен sudo и питон из arm_realsense")
     p.add_argument("--list-cameras", action="store_true",
                    help="показать доступные камеры и выйти")
+    p.add_argument("--no-voice", action="store_true",
+                   help="выключить голосовые команды")
+    p.add_argument("--audio-device", type=int,
+                   help="номер микрофона, если их несколько")
     p.add_argument("--record", metavar="ФАЙЛ.csv",
                    help="куда писать журнал; по умолчанию в logs/")
     p.add_argument("--no-record", action="store_true",
