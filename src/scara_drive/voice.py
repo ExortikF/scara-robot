@@ -44,8 +44,16 @@ class VoiceCommands:
 
     SAMPLE_RATE = 16000
 
+    #: Ниже этого уровня кусок считается тишиной и не распознаётся.
+    #:
+    #: Распознавание — не бесплатная операция, а тишина занимает почти всё
+    #: время. Без этой отсечки оно молотит вхолостую и отбирает процессор
+    #: у камеры: кадров становится заметно меньше.
+    SILENCE_LEVEL = 300          # среднее по модулю, шкала int16
+
     def __init__(self, on_command: Callable[[str], None],
-                 model_dir: Path | None = None, device: int | None = None):
+                 model_dir: Path | None = None, device: int | None = 0,
+                 silence_level: int | None = None):
         try:
             import sounddevice
             import vosk
@@ -59,6 +67,9 @@ class VoiceCommands:
         self._vosk = vosk
         self.on_command = on_command
         self.device = device
+        self.silence_level = (self.SILENCE_LEVEL if silence_level is None
+                              else silence_level)
+        self.skipped = 0            # сколько кусков пропущено как тишина
 
         folder = model_dir or MODEL_DIR
         if not folder.is_dir():
@@ -108,6 +119,17 @@ class VoiceCommands:
                 return name
         return None
 
+    def _is_silence(self, chunk: bytes) -> bool:
+        """Тихий ли кусок. Дешёвая проверка до дорогого распознавания."""
+        import array
+
+        samples = array.array("h")
+        samples.frombytes(chunk)
+        if not samples:
+            return True
+        level = sum(abs(s) for s in samples) / len(samples)
+        return level < self.silence_level
+
     # --- поток -----------------------------------------------------------
 
     def _feed(self, indata, frames, time_info, status) -> None:
@@ -129,6 +151,10 @@ class VoiceCommands:
                         chunk = self._queue.get(timeout=0.2)
                     except queue.Empty:
                         continue
+                    if self._is_silence(chunk):
+                        self.skipped += 1
+                        continue
+
                     if recognizer.AcceptWaveform(chunk):
                         text = json.loads(recognizer.Result()).get("text", "")
                     else:

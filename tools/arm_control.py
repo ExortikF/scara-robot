@@ -1797,7 +1797,8 @@ def run_gui(loop, source, axes, arm_filter, args):
     if not args.no_voice:
         try:
             from scara_drive.voice import VoiceCommands
-            voice = VoiceCommands(on_voice, device=args.audio_device)
+            voice = VoiceCommands(on_voice, device=args.audio_device,
+                                  silence_level=args.voice_level)
             voice.start()
         except SystemExit as exc:
             log.warning("голосовые команды выключены: %s",
@@ -1944,8 +1945,10 @@ def main() -> int:
                    help="показать доступные камеры и выйти")
     p.add_argument("--no-voice", action="store_true",
                    help="выключить голосовые команды")
-    p.add_argument("--audio-device", type=int,
-                   help="номер микрофона, если их несколько")
+    p.add_argument("--audio-device", type=int, default=0,
+                   help="номер микрофона; список — tools/mics.py")
+    p.add_argument("--voice-level", type=int, default=300,
+                   help="порог тишины: ниже него звук не распознаётся")
     p.add_argument("--record", metavar="ФАЙЛ.csv",
                    help="куда писать журнал; по умолчанию в logs/")
     p.add_argument("--no-record", action="store_true",
