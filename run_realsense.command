@@ -25,10 +25,17 @@ fi
 
 # Если прошлый запуск завершился неаккуратно, камера остаётся занята,
 # и следующий получает «No device connected». Гасим хвосты заранее.
+# Незавершённый прошлый запуск держит камеру, и новый получит
+# «failed to set power state» при исправном устройстве.
 if pgrep -f "arm_control.py" >/dev/null 2>&1; then
     echo "нахожу незакрытый прошлый запуск, останавливаю..."
-    sudo pkill -f "arm_control.py" || true
+    sudo pkill -f "arm_control.py" 2>/dev/null || true
     sleep 1
+    # Упрямые добиваем: пока процесс жив, камера занята.
+    if pgrep -f "arm_control.py" >/dev/null 2>&1; then
+        sudo pkill -9 -f "arm_control.py" 2>/dev/null || true
+        sleep 1
+    fi
 fi
 
 echo "сгоняю VDCAssistant с камеры..."

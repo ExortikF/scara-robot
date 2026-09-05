@@ -571,6 +571,7 @@ class RealSenseFrames:
                 "--confirm --realsense\n"
             )
 
+        self._warn_about_leftovers()
         self._release_daemon()
 
         # Контекст держим в объекте, а не создаём на месте: если он
@@ -648,6 +649,37 @@ class RealSenseFrames:
     #: со стороны это неотличимо от зависшей программы. Полутора секунд
     #: рабочему режиму хватает с запасом: камера отдаёт кадры сразу.
     PROBE_TIMEOUT_MS = 1500
+
+    @staticmethod
+    def _warn_about_leftovers() -> None:
+        """Найти незавершённые прошлые запуски.
+
+        Они держат камеру, и это выглядит как «failed to set power state»
+        при живом и видимом устройстве — то есть как беда с драйвером,
+        хотя на самом деле мы сами себе мешаем. Отличить одно от другого
+        по сообщению librealsense невозможно, поэтому проверяем прямо.
+        """
+        import os
+        import subprocess
+
+        try:
+            out = subprocess.run(["pgrep", "-f", "arm_control.py"],
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return
+
+        mine = {os.getpid(), os.getppid()}
+        others = [int(p) for p in out.stdout.split() if int(p) not in mine]
+        if not others:
+            return
+
+        raise SystemExit(
+            f"\nУЖЕ ЗАПУЩЕНО: найдено процессов arm_control — {len(others)}.\n\n"
+            "Они держат камеру, и новый запуск получит «failed to set power\n"
+            "state» при совершенно исправном устройстве.\n\n"
+            "Закройте их:\n"
+            "    sudo pkill -f arm_control.py\n\n"
+            f"(это процессы {', '.join(map(str, others))})\n")
 
     @staticmethod
     def _release_daemon(settle_s: float = 0.6) -> None:
