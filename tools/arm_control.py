@@ -690,13 +690,13 @@ class RealSenseFrames:
         if not others:
             return
 
-        raise SystemExit(
-            f"\nУЖЕ ЗАПУЩЕНО: найдено процессов arm_control — {len(others)}.\n\n"
-            "Они держат камеру, и новый запуск получит «failed to set power\n"
-            "state» при совершенно исправном устройстве.\n\n"
-            "Закройте их:\n"
-            "    sudo pkill -f arm_control.py\n\n"
-            f"(это процессы {', '.join(map(str, others))})\n")
+        # Предупреждаем, но не запрещаем: определить «чужой» процесс
+        # надёжно нельзя, а запрет на догадке останавливал бы работу на
+        # ровном месте. Решение остаётся за человеком.
+        log.warning("похоже, запущено ещё %d процессов arm_control (%s). "
+                    "Если камера не откроется — закройте их: "
+                    "sudo pkill -9 -f arm_control.py",
+                    len(others), ", ".join(map(str, others)))
 
     @staticmethod
     def _release_daemon(settle_s: float = 0.6) -> None:
@@ -751,10 +751,11 @@ class RealSenseFrames:
         for number, (w, h, f) in enumerate(modes, 1):
             log.info("  %d/%d: пробую %dx%d@%d", number, len(modes), w, h, f)
             try:
-                # Конвейер привязываем к тому же контексту, который нашёл
-                # устройство. Со своим собственным он ищет камеру заново и
-                # может её не увидеть, если она ещё занята с прошлого раза.
-                pipeline = rs.pipeline(self._context)
+                # Ровно как в рабочем проекте arm_realsense: конвейер без
+                # явного контекста. Привязка к своему контексту выглядела
+                # логичнее, но в проверенном коде её нет, а всё, что здесь
+                # отличается от него, — лишний повод для отказа.
+                pipeline = rs.pipeline()
                 cfg = rs.config()
                 # Только цвет. Глубину не включаем — она тут не нужна и
                 # съедала бы полосу, из-за которой режим может не пойти.
