@@ -1,4 +1,4 @@
-"""Голосовые команды офлайн: старт, стоп, россия.
+"""Голосовые команды офлайн: старт, стоп, линия.
 
 Распознавание — vosk, целиком на машине, без интернета. Модель лежит в
 ``models/vosk-ru``.
@@ -26,19 +26,25 @@ log = logging.getLogger(__name__)
 #: Слова на каждую команду. Их несколько, потому что распознаватель
 #: путает похожие, а цена пропущенного «стоп» выше цены лишнего.
 COMMANDS = {
-    "стоп": ("стоп", "стой", "стопе", "стоб", "хватит"),
-    "флаг": ("путин", "победа", "побед"),
-    "старт": ("старт", "старты", "пуск", "поехали", "начали"),
-    "россия": ("россия", "россии", "russia", "середина"),
+    "стоп": ("стоп", "стой", "стопэ", "хватит"),
+    "старт": ("старт", "старты", "пуск", "поехали"),
+    "линия": ("линия", "линию", "линии", "лини"),
 }
 
-#: Порядок разбора, а не только перечисления.
+#: Порядок разбора: если в одной фразе услышаны две команды, побеждать
+#: должен останов.
+PRIORITY = ("стоп", "старт", "линия")
+
+#: Ниже этой уверенности слово не принимается за команду.
 #:
-#: «Стоп» первым: если в одной фразе услышаны две команды, побеждать
-#: должен останов. «Флаг» раньше «россии» намеренно — фраза целиком
-#: содержит и то и другое, и без этого она срабатывала бы как установка
-#: середины.
-PRIORITY = ("стоп", "флаг", "старт", "россия")
+#: Модель маленькая и в шуме мастерской охотно «слышит» команды там, где
+#: их нет. Ложный «старт» опаснее пропущенного: робот трогается сам.
+MIN_CONFIDENCE = 0.75
+
+#: На частичном результате принимается только останов. Частичные
+#: неустойчивы — слово может смениться следующим куском, — но ждать
+#: паузы в речи ради «стоп» неправильно: он нужен немедленно.
+PARTIAL_ALLOWED = ("стоп",)
 
 MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "vosk-ru"
 
@@ -113,6 +119,9 @@ class VoiceCommands:
         self.last_heard: str | None = None
         self.last_heard_at: float = 0.0
         self.level = 0.0            # текущий уровень звука
+        self.rejected = 0           # отброшено по слабой уверенности
+        self.last_confidence = 0.0
+        self.min_confidence = MIN_CONFIDENCE
 
     # --- разбор ----------------------------------------------------------
 
@@ -126,10 +135,8 @@ class VoiceCommands:
         'стоп'
         >>> VoiceCommands.match("поехали давай")
         'старт'
-        >>> VoiceCommands.match("россия")
-        'россия'
-        >>> VoiceCommands.match("россия путин победа")
-        'флаг'
+        >>> VoiceCommands.match("проведи линию")
+        'линия'
         >>> VoiceCommands.match("погода хорошая") is None
         True
         """
@@ -151,6 +158,18 @@ class VoiceCommands:
         self.level = level
         return level < self.silence_level
 
+    def _confident(self, result: dict, command: str) -> bool:
+        """Достаточно ли уверенно распознано слово команды."""
+        words = result.get("result") or []
+        variants = set(COMMANDS[command])
+        scores = [w.get("conf", 1.0) for w in words
+                  if w.get("word") in variants]
+        if not scores:
+            return True          # разбора по словам нет — верим тексту
+        best = max(scores)
+        self.last_confidence = best
+        return best >= self.min_confidence
+
     # --- поток -----------------------------------------------------------
 
     def _feed(self, indata, frames, time_info, status) -> None:
@@ -161,13 +180,16 @@ class VoiceCommands:
     def _worker(self) -> None:
         recognizer = self._vosk.KaldiRecognizer(
             self._model, self.SAMPLE_RATE, self._grammar)
+        # Просим разбор по словам с оценками — без него уверенность
+        # проверить нечем, и в шуме команды мерещатся.
+        recognizer.SetWords(True)
         try:
             with self._sd.RawInputStream(
                     samplerate=self.SAMPLE_RATE, blocksize=4000,
                     device=self.device, dtype="int16", channels=1,
                     callback=self._feed):
                 self.status = "слушаю"
-                log.info("слушаю голос: старт, стоп, россия")
+                log.info("слушаю голос: старт, стоп, линия")
                 while not self._stop.is_set():
                     try:
                         chunk = self._queue.get(timeout=0.2)
@@ -178,15 +200,24 @@ class VoiceCommands:
                         continue
 
                     if recognizer.AcceptWaveform(chunk):
-                        text = json.loads(recognizer.Result()).get("text", "")
+                        result = json.loads(recognizer.Result())
+                        text = result.get("text", "")
+                        final = True
                     else:
-                        # Частичный результат: команду отдаём, не дожидаясь
-                        # паузы в речи. Для «стоп» это заметно быстрее.
-                        text = json.loads(
-                            recognizer.PartialResult()).get("partial", "")
+                        result = json.loads(recognizer.PartialResult())
+                        text = result.get("partial", "")
+                        final = False
                     if not text:
                         continue
+
                     command = self.match(text)
+                    if command and not final and command not in PARTIAL_ALLOWED:
+                        continue        # ждём окончательного результата
+                    if command and final and not self._confident(result, command):
+                        self.rejected += 1
+                        log.debug("«%s» отброшено: слабая уверенность", command)
+                        continue
+
                     if command and command != self.last:
                         self.last = command
                         self.heard += 1
