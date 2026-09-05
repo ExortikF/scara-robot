@@ -1590,17 +1590,29 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     started_at = time.monotonic()
     journal = journal_file = None
-    if args.record:
+
+    # Журнал пишется ВСЕГДА. Спорные вещи — «ноль уплыл», «ось не пошла» —
+    # случаются редко и по памяти не восстанавливаются, а включать запись
+    # заранее никто не догадывается: беда уже случилась.
+    record_path = args.record
+    if record_path is None and not args.no_record:
+        folder = Path(__file__).resolve().parents[1] / "logs"
+        folder.mkdir(exist_ok=True)
+        record_path = folder / time.strftime("arm_%Y%m%d_%H%M%S.csv")
+
+    if record_path:
         import csv
-        journal_file = open(args.record, "w", newline="", encoding="utf-8")
-        columns = ["t", "событие", "рука_q1", "рука_q2", "отн_q1", "отн_q2"]
+        journal_file = open(record_path, "w", newline="", encoding="utf-8")
+        columns = ["t", "событие", "обмен_мс",
+                   "рука_q1", "рука_q2", "отн_q1", "отн_q2"]
         for axis in axes:
             short = axis.name.split()[0]
-            columns += [f"вал_{short}", f"сустав_{short}"]
+            columns += [f"вал_{short}", f"сустав_{short}",
+                        f"состояние_{short}"]
         journal = csv.DictWriter(journal_file, fieldnames=columns,
                                  extrasaction="ignore")
         journal.writeheader()
-        log.info("пишу журнал в %s", args.record)
+        log.info("журнал: %s", record_path)
     zeroed = {"value": False}
     relaxed = {"value": False}
     show_diag = {"value": False}
@@ -1633,7 +1645,16 @@ def run_gui(loop, source, axes, arm_filter, args):
                 relative[0] if axis.joint == "q1" else relative[1])
             for axis in axes
         })
-        record("цель", рука_q1=smoothed[0], рука_q2=smoothed[1],
+        record("цель",
+               **{f"состояние_{a.name.split()[0]}":
+                  ("расслаблена" if loop.followers[a.name].relaxed else
+                   "запрещено" if not loop.followers[a.name].armed else
+                   "упор" if loop.followers[a.name].out_of_range else
+                   "удержание" if loop.followers[a.name].telemetry.holding
+                   else "едет")
+                  for a in axes},
+               **{f"обмен_мс": loop.sweep_ms},
+               рука_q1=smoothed[0], рука_q2=smoothed[1],
                отн_q1=relative[0], отн_q2=relative[1],
                **{f"вал_{a.name.split()[0]}": loop.followers[a.name].telemetry.actual_deg
                   for a in axes},
@@ -1759,7 +1780,7 @@ def run_gui(loop, source, axes, arm_filter, args):
     def shutdown():
         if journal_file is not None:
             journal_file.close()
-            log.info("журнал закрыт: %s", args.record)
+            log.info("журнал закрыт: %s", record_path)
         worker.stop()
         try:
             loop.set_relaxed(True)      # не оставляем оси под током
@@ -1893,7 +1914,9 @@ def main() -> int:
     p.add_argument("--list-cameras", action="store_true",
                    help="показать доступные камеры и выйти")
     p.add_argument("--record", metavar="ФАЙЛ.csv",
-                   help="писать журнал: цель, положение осей, время")
+                   help="куда писать журнал; по умолчанию в logs/")
+    p.add_argument("--no-record", action="store_true",
+                   help="не вести журнал вовсе")
     p.add_argument("--median", type=int, default=3,
                    help="кадров в медианном окне; гасит срывы точек")
     p.add_argument("--min-cutoff", type=float, default=1.0,
