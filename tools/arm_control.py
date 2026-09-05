@@ -920,11 +920,19 @@ def open_camera(cv2, index: int):
 # цифрам это ловится долго.
 
 COLOR_BONE = (74, 158, 255)
-COLOR_JOINT = (255, 255, 255)
 COLOR_ARC = (61, 220, 132)
 
+# Цвет суставов показывает состояние — его видно, не отрывая глаз от
+# собственной руки, а строку состояния внизу окна в этот момент не
+# прочитать. Кадр хранится в RGB, поэтому и тройки заданы как RGB.
+JOINT_COLOURS = {
+    "нет нуля": (74, 158, 255),     # синий: середина ещё не задана
+    "стоп":     (224, 82, 82),      # красный: движение запрещено
+    "работа":   (61, 220, 132),     # зелёный: идём за рукой
+}
 
-def draw_arm(cv2, rgb, points, angles, zero_q1=None):
+
+def draw_arm(cv2, rgb, points, angles, zero_q1=None, state="нет нуля"):
     """Нанести на кадр звенья, суставы и дуги углов.
 
     ``zero_q1`` — направление плеча в момент калибровки середины. Если оно
@@ -940,8 +948,9 @@ def draw_arm(cv2, rgb, points, angles, zero_q1=None):
     shoulder, elbow, wrist = (tuple(map(int, p)) for p in points)
     cv2.line(frame, shoulder, elbow, COLOR_BONE, 4)
     cv2.line(frame, elbow, wrist, COLOR_BONE, 4)
+    colour = JOINT_COLOURS.get(state, JOINT_COLOURS["нет нуля"])
     for point, radius in ((shoulder, 9), (elbow, 9), (wrist, 7)):
-        cv2.circle(frame, point, radius, COLOR_JOINT, -1)
+        cv2.circle(frame, point, radius, colour, -1)
         cv2.circle(frame, point, radius, (0, 0, 0), 2)
 
     if angles is not None:
@@ -1687,8 +1696,15 @@ def run_gui(loop, source, axes, arm_filter, args):
         # изображение Tk стоит дорого, а распознавание идёт своим темпом.
         if frame is not None and frame_id != state["shown_frame"]:
             state["shown_frame"] = frame_id
+            if not zeroed["value"]:
+                joint_state = "нет нуля"
+            elif paused["value"] or relaxed["value"] or loop.error_text:
+                joint_state = "стоп"
+            else:
+                joint_state = "работа"
             painted = draw_arm(cv2, frame, points, angles,
-                               zero["q1"] if zeroed["value"] else None)
+                               zero["q1"] if zeroed["value"] else None,
+                               state=joint_state)
             image = Image.fromarray(painted)
             image.thumbnail((720, 430))
             photo = ImageTk.PhotoImage(image)
