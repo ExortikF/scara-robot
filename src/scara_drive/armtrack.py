@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -103,6 +104,69 @@ def angles_from_points(shoulder: Point, elbow: Point, wrist: Point) -> ArmAngles
                      upper_len=upper_len, fore_len=fore_len)
 
 
+class OneEuro:
+    """Сглаживание с переменной силой — «одно евро».
+
+    Обычное экспоненциальное сглаживание вынуждает выбирать между двух
+    зол: слабое пропускает дрожь, сильное добавляет запаздывание. Здесь
+    сила подстраивается под скорость самого сигнала.
+
+    Идея простая: дрожание неподвижной руки — это быстрые колебания
+    малой амплитуды, а настоящее движение — заметное смещение. Поэтому
+    частота среза поднимается пропорционально измеренной скорости:
+    рука стоит — фильтр давит сильно и дрожь исчезает; рука пошла —
+    фильтр отпускает и не мешает.
+
+    ``min_cutoff`` — сила сглаживания в покое, меньше значит спокойнее.
+    ``beta`` — насколько быстро фильтр отпускает на движении.
+
+    Работает по кратчайшей дуге, поэтому годится для углов: переход
+    через 180° не считается мгновенным скачком на пол-оборота.
+    """
+
+    def __init__(self, min_cutoff: float = 1.0, beta: float = 0.02,
+                 d_cutoff: float = 1.0):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self._value: float | None = None
+        self._rate = 0.0
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * max(cutoff, 1e-6))
+        return 1.0 / (1.0 + tau / max(dt, 1e-6))
+
+    def reset(self) -> None:
+        self._value = None
+        self._rate = 0.0
+
+    @property
+    def value(self) -> float | None:
+        return self._value
+
+    def update(self, measurement: float, dt: float) -> float:
+        """Принять измерение, вернуть сглаженное.
+
+        >>> f = OneEuro(min_cutoff=1.0, beta=0.02)
+        >>> _ = f.update(0.0, 1 / 30)
+        >>> round(f.update(0.0, 1 / 30), 6)
+        0.0
+        """
+        if self._value is None:
+            self._value = float(measurement)
+            return self._value
+
+        step = wrap180(measurement - self._value)
+        rate = step / max(dt, 1e-6)
+        self._rate += (rate - self._rate) * self._alpha(self.d_cutoff, dt)
+
+        cutoff = self.min_cutoff + self.beta * abs(self._rate)
+        self._value = wrap180(
+            self._value + step * self._alpha(cutoff, dt))
+        return self._value
+
+
 @dataclass
 class ArmFilter:
     """Сглаживание и отсев заведомо неверных распознаваний.
@@ -120,7 +184,16 @@ class ArmFilter:
     """
 
     median_window: int = 5          # кадров в медианном окне
-    smoothing: float = 0.45         # 0..1, экспоненциальное сглаживание
+    smoothing: float = 0.45         # используется, только если adaptive=False
+
+    #: Переменное сглаживание вместо постоянного.
+    #:
+    #: Постоянное вынуждает выбирать между дрожью и запаздыванием, а с
+    #: шумного трекинга нужно и то и другое сразу. Переменное давит
+    #: сильно, пока рука почти стоит, и отпускает на движении.
+    adaptive: bool = True
+    min_cutoff: float = 1.0         # сила сглаживания в покое
+    beta: float = 0.02              # как быстро отпускает на движении
     max_len_change: float = 0.25    # скачок длины звена за кадр
     max_jump_deg: float = 45.0      # скачок угла за кадр, больше — отбросить
 
@@ -135,6 +208,9 @@ class ArmFilter:
     def __post_init__(self) -> None:
         self._q1 = deque(maxlen=self.median_window)
         self._q2 = deque(maxlen=self.median_window)
+        self._euro = (OneEuro(self.min_cutoff, self.beta),
+                      OneEuro(self.min_cutoff, self.beta))
+        self._stamp: float | None = None
 
     @property
     def last(self) -> tuple[float, float] | None:
@@ -144,10 +220,14 @@ class ArmFilter:
     def reset(self) -> None:
         self._q1.clear()
         self._q2.clear()
+        for euro in self._euro:
+            euro.reset()
+        self._stamp = None
         self._lens = None
         self._out = None
 
-    def update(self, angles: ArmAngles) -> tuple[float, float] | None:
+    def update(self, angles: ArmAngles,
+               dt: float | None = None) -> tuple[float, float] | None:
         """Принять измерение. Вернуть сглаженные (q1, q2) или None, если отбросили."""
         lens = (angles.upper_len, angles.fore_len)
 
@@ -170,7 +250,16 @@ class ArmFilter:
         self._q2.append(angles.q2_deg)
         median = (_circular_median(self._q1), _circular_median(self._q2))
 
-        if self._out is None:
+        if self.adaptive:
+            # dt можно передать явно — это нужно для проверок, где кадры
+            # подаются без пауз и часы показали бы микросекунды.
+            if dt is None:
+                now = time.monotonic()
+                dt = (now - self._stamp) if self._stamp else 1 / 30
+                self._stamp = now
+            self._out = (self._euro[0].update(median[0], dt),
+                         self._euro[1].update(median[1], dt))
+        elif self._out is None:
             self._out = median
         else:
             self._out = (

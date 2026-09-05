@@ -1829,7 +1829,16 @@ def main() -> int:
                         "веб-камеры; нужен sudo и питон из arm_realsense")
     p.add_argument("--list-cameras", action="store_true",
                    help="показать доступные камеры и выйти")
-    p.add_argument("--smoothing", type=float, default=0.6)
+    p.add_argument("--median", type=int, default=3,
+                   help="кадров в медианном окне; гасит срывы точек")
+    p.add_argument("--min-cutoff", type=float, default=1.0,
+                   help="сглаживание в покое; меньше — спокойнее, но вязче")
+    p.add_argument("--beta", type=float, default=0.1,
+                   help="как быстро сглаживание отпускает на движении")
+    p.add_argument("--fixed-smoothing", action="store_true",
+                   help="постоянное сглаживание вместо переменного")
+    p.add_argument("--smoothing", type=float, default=0.6,
+                   help="сила постоянного сглаживания, если включено")
     p.add_argument("--diag", action="store_true",
                    help="замерить, где теряются кадры, и выйти")
     p.add_argument("--diag-seconds", type=float, default=12.0)
@@ -1917,7 +1926,10 @@ def main() -> int:
                   else MarkerArmSource(args.camera, realsense=args.realsense,
                                 allow_reset=args.allow_camera_reset))
         source.MIN_VISIBILITY = args.min_visibility
-        arm_filter = ArmFilter(smoothing=args.smoothing,
+        arm_filter = ArmFilter(median_window=args.median,
+                               adaptive=not args.fixed_smoothing,
+                               min_cutoff=args.min_cutoff, beta=args.beta,
+                               smoothing=args.smoothing,
                                max_len_change=float("inf"),
                                max_jump_deg=float("inf"))
         try:
@@ -1977,11 +1989,21 @@ def main() -> int:
               else MarkerArmSource(args.camera, realsense=args.realsense,
                                 allow_reset=args.allow_camera_reset))
     source.MIN_VISIBILITY = args.min_visibility
-    # Отсев кадров убран: он резал нормальные движения, а картина
-    # «скелет на экране есть, а робот стоит» разбиралась дольше, чем
-    # стоили пойманные сбои. Осталось сглаживание — оно нужно, чтобы
-    # ось не дёргалась на дрожании точек.
-    arm_filter = ArmFilter(median_window=3, smoothing=args.smoothing,
+    # Кадры не отбрасываются: отсев резал нормальные движения, а картина
+    # «скелет виден, робот стоит» разбиралась дольше, чем стоили пойманные
+    # сбои. Шум давится двумя средствами, и роли у них разные.
+    #
+    # Медиана убирает СРЫВЫ — одиночные улетевшие точки. На замерах окно
+    # из трёх кадров срезает худший выброс с 37° до 2.4°; окна больше
+    # ничего не добавляют, только запаздывание.
+    #
+    # Переменное сглаживание убирает ДРОЖЬ — мелкое непрерывное
+    # подрагивание. Оно давит сильно, пока рука почти стоит, и отпускает
+    # на движении, поэтому не платит за тишину запаздыванием.
+    arm_filter = ArmFilter(median_window=args.median,
+                           adaptive=not args.fixed_smoothing,
+                           min_cutoff=args.min_cutoff, beta=args.beta,
+                           smoothing=args.smoothing,
                            max_len_change=float("inf"),
                            max_jump_deg=float("inf"))
 
