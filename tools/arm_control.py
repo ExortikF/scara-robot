@@ -548,7 +548,6 @@ class RealSenseFrames:
 
     def __init__(self, width: int = 0, height: int = 0, fps: int = 0):
         import os
-        import subprocess
 
         self._errors: list[str] = []
 
@@ -572,9 +571,7 @@ class RealSenseFrames:
                 "--confirm --realsense\n"
             )
 
-        # Демон держит RGB-интерфейс; поднимется сам, убивать безопасно.
-        subprocess.run(["killall", "VDCAssistant"],
-                       capture_output=True, check=False)
+        self._release_daemon()
 
         # Контекст держим в объекте, а не создаём на месте: если он
         # соберётся сборщиком мусора, полученные из него устройства
@@ -606,6 +603,7 @@ class RealSenseFrames:
                 return
             log.warning("режим из прошлого запуска не пошёл — похоже, камера "
                         "занята. Сбрасываю, не перебирая остальные")
+            self._release_daemon()
             if self._reset_device() and self._try_modes([cached]):
                 log.info("после сброса открылась на прежнем режиме")
                 return
@@ -631,29 +629,51 @@ class RealSenseFrames:
     #: рабочему режиму хватает с запасом: камера отдаёт кадры сразу.
     PROBE_TIMEOUT_MS = 1500
 
+    @staticmethod
+    def _release_daemon(settle_s: float = 0.6) -> None:
+        """Согнать VDCAssistant с камеры.
+
+        Демон захватывает RGB-интерфейс, как только камерой интересуется
+        что-нибудь через AVFoundation — включая нашу же неудавшуюся
+        попытку открыть поток. Пока он держит интерфейс, librealsense
+        отвечает «failed to set power state». Убивать безопасно: он
+        поднимается сам при следующем обращении системы к камере.
+
+        Поэтому гнать его надо не один раз при старте, а перед каждой
+        попыткой достучаться до камеры.
+        """
+        import subprocess
+
+        subprocess.run(["killall", "VDCAssistant"],
+                       capture_output=True, check=False)
+        time.sleep(settle_s)         # дать интерфейсу освободиться
+
     def _reset_device(self) -> bool:
         """Сбросить камеру и заново её найти.
 
         Помогает, когда устройство осталось занято незакрытым прошлым
         запуском: дешевле, чем передёргивать кабель.
         """
-        import subprocess
-
         rs = self._rs
-        try:
-            devices = list(self._context.query_devices())
-            if not devices:
-                return False
-            devices[0].hardware_reset()
-        except Exception as exc:
-            log.warning("сброс не удался: %s", exc)
-            return False
+        for attempt in (1, 2):
+            self._release_daemon()
+            try:
+                self._context = rs.context()
+                devices = list(self._context.query_devices())
+                if not devices:
+                    log.warning("камеру не видно после попытки %d", attempt)
+                    continue
+                devices[0].hardware_reset()
+            except Exception as exc:
+                log.warning("сброс, попытка %d: %s", attempt, exc)
+                continue
 
-        time.sleep(4.0)              # даёт камере переподключиться
-        subprocess.run(["killall", "VDCAssistant"],
-                       capture_output=True, check=False)
-        self._context = rs.context()
-        return bool(list(self._context.query_devices()))
+            time.sleep(4.0)          # даёт камере переподключиться
+            self._release_daemon()
+            self._context = rs.context()
+            if list(self._context.query_devices()):
+                return True
+        return False
 
     def _try_modes(self, modes) -> bool:
         """Пройти по режимам, вернуть True на первом, отдавшем кадр."""
