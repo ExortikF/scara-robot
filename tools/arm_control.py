@@ -1223,6 +1223,34 @@ def preflight_line(transport: SerialConfig) -> None:
     return
 
 
+HOME_FILE = Path(__file__).with_name("arm_home.json")
+
+
+def load_home() -> dict:
+    """Исходное положение осей в ИМПУЛЬСАХ энкодера.
+
+    Именно в импульсах, а не в градусах от программной середины: середину
+    человек задаёт заново по многу раз за сеанс, и привязанное к ней
+    исходное уезжало бы вместе с ней. Импульсы привязаны к валу.
+    """
+    if not HOME_FILE.is_file():
+        return {}
+    try:
+        return {k: int(v) for k, v in
+                json.loads(HOME_FILE.read_text(encoding="utf-8")).items()}
+    except (OSError, ValueError) as exc:
+        log.warning("не читается %s: %s", HOME_FILE.name, exc)
+        return {}
+
+
+def save_home(home: dict) -> None:
+    try:
+        HOME_FILE.write_text(json.dumps(home, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    except OSError as exc:
+        log.warning("не сохранить исходное: %s", exc)
+
+
 def load_calibration() -> dict:
     """Сохранённые нули осей в импульсах энкодера.
 
@@ -1414,7 +1442,7 @@ def run_gui(loop, source, axes, arm_filter, args):
               text="сначала убедитесь, что скелет лёг на руку правильно, "
                    "потом «ноль здесь» и снимайте паузу").pack(pady=(0, 2))
     ttk.Label(root, font=("SF Pro Text", 11), foreground="#888",
-              text="голосом: «старт» · «стоп» · «линия»").pack(pady=(0, 8))
+              text="голосом: «старт» · «стоп» · «линия» · «положение»").pack(pady=(0, 8))
 
     middle = ttk.Frame(root)
     middle.pack(fill="both", expand=True, padx=14)
@@ -1515,6 +1543,71 @@ def run_gui(loop, source, axes, arm_filter, args):
             detector.pack_forget()
             diag_button.config(text="диагностика")
 
+    def capture_home() -> None:
+        """Запомнить, где оси стоят сейчас, как исходное положение.
+
+        Хранится в ИМПУЛЬСАХ энкодера, а не в градусах от программной
+        середины: середину человек задаёт заново по многу раз за сеанс, и
+        привязанное к ней исходное уезжало бы вместе с ней.
+        """
+        home.clear()
+        for axis in axes:
+            follower = loop.followers[axis.name]
+            home[axis.name] = follower.telemetry.raw_counts
+        save_home(home)
+        home_button.config(text="В ИСХОДНОЕ")
+        status.config(
+            text="исходное положение запомнено. Кнопка теперь возвращает "
+                 "в него; чтобы задать заново — «РАССЛАБИТЬ» и снова сюда.",
+            foreground="")
+
+    def go_home() -> None:
+        """Вернуть оси в запомненное положение.
+
+        Слежение за рукой при этом выключается: два источника цели
+        одновременно тянули бы ось в разные стороны.
+        """
+        if not home:
+            capture_home()
+            return
+
+        paused["value"] = True          # камера больше не ставит цели
+        pause_button.config(text="ПРОДОЛЖИТЬ")
+        loop.ensure_running()
+
+        for axis in axes:
+            follower = loop.followers[axis.name]
+            follower.set_target(follower.counts_to_degrees(home[axis.name]))
+        loop.set_armed(True)            # но контур ехать обязан
+        state["homing"] = True
+        status.config(text="возвращаюсь в исходное...", foreground="#ffb648")
+        root.after(200, watch_homing)
+
+    def watch_homing() -> None:
+        """Довести возврат до конца и остановиться."""
+        if not state.get("homing"):
+            return
+        worst = max(abs(loop.followers[a.name].telemetry.error_deg)
+                    for a in axes)
+        if worst > 2.0 and not loop.error_text:
+            root.after(200, watch_homing)
+            return
+        state["homing"] = False
+        loop.set_armed(False)
+        loop.freeze()
+        status.config(
+            text=("возврат прерван: " + loop.error_text) if loop.error_text
+            else "в исходном положении. «ПРОДОЛЖИТЬ» — снова за рукой",
+            foreground="#e05252" if loop.error_text else "")
+
+    def home_pressed() -> None:
+        # Пока момент снят, человек ставит руку сам — значит хочет задать
+        # исходное, а не ехать в него.
+        if relaxed["value"] or not home:
+            capture_home()
+        else:
+            go_home()
+
     def clear_fault():
         """Снять аварию и вернуть контур в работу — но только на паузе."""
         if not loop.clear_fault():
@@ -1595,9 +1688,12 @@ def run_gui(loop, source, axes, arm_filter, args):
     relax_button.grid(row=0, column=4, padx=6)
     ttk.Button(buttons, text="СБРОС ОШИБКИ", command=clear_fault).grid(
         row=0, column=5, padx=6)
+    home_button = ttk.Button(buttons, command=home_pressed,
+                             text="В ИСХОДНОЕ" if home else "ЗАПОМНИТЬ ИСХОДНОЕ")
+    home_button.grid(row=0, column=6, padx=6)
     diag_button = ttk.Button(buttons, text="диагностика",
                              command=lambda: toggle_diag())
-    diag_button.grid(row=0, column=6, padx=6)
+    diag_button.grid(row=0, column=7, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1,
              "last_target_ms": 0.0}
@@ -1628,6 +1724,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         journal.writeheader()
         log.info("журнал: %s", record_path)
     zeroed = {"value": False}
+    home = load_home()
     relaxed = {"value": False}
     show_diag = {"value": False}
 
@@ -1849,7 +1946,8 @@ def run_gui(loop, source, axes, arm_filter, args):
         """
         actions = {"стоп": emergency_stop,
                    "старт": lambda: (toggle_pause() if paused["value"] else None),
-                   "линия": set_middle}
+                   "линия": set_middle,
+                   "положение": home_pressed}
         action = actions.get(command)
         if action is not None:
             root.after(0, action)
