@@ -931,6 +931,9 @@ JOINT_COLOURS = {
     "работа":   (61, 220, 132),     # зелёный: идём за рукой
 }
 
+#: Отдельная раскраска по суставам: плечо, локоть, кисть.
+FLAG_COLOURS = ((255, 255, 255), (0, 57, 166), (213, 43, 30))
+
 
 def draw_arm(cv2, rgb, points, angles, zero_q1=None, state="нет нуля"):
     """Нанести на кадр звенья, суставы и дуги углов.
@@ -948,8 +951,13 @@ def draw_arm(cv2, rgb, points, angles, zero_q1=None, state="нет нуля"):
     shoulder, elbow, wrist = (tuple(map(int, p)) for p in points)
     cv2.line(frame, shoulder, elbow, COLOR_BONE, 4)
     cv2.line(frame, elbow, wrist, COLOR_BONE, 4)
-    colour = JOINT_COLOURS.get(state, JOINT_COLOURS["нет нуля"])
-    for point, radius in ((shoulder, 9), (elbow, 9), (wrist, 7)):
+    if state == "флаг":
+        colours = FLAG_COLOURS
+    else:
+        one = JOINT_COLOURS.get(state, JOINT_COLOURS["нет нуля"])
+        colours = (one, one, one)
+    for (point, radius), colour in zip(
+            ((shoulder, 9), (elbow, 9), (wrist, 7)), colours):
         cv2.circle(frame, point, radius, colour, -1)
         cv2.circle(frame, point, radius, (0, 0, 0), 2)
 
@@ -1414,7 +1422,7 @@ def run_gui(loop, source, axes, arm_filter, args):
               text="сначала убедитесь, что скелет лёг на руку правильно, "
                    "потом «ноль здесь» и снимайте паузу").pack(pady=(0, 2))
     ttk.Label(root, font=("SF Pro Text", 11), foreground="#888",
-              text="голосом: «старт» · «стоп» · «нули»").pack(pady=(0, 8))
+              text="голосом: «старт» · «стоп» · «россия»").pack(pady=(0, 8))
 
     middle = ttk.Frame(root)
     middle.pack(fill="both", expand=True, padx=14)
@@ -1696,7 +1704,9 @@ def run_gui(loop, source, axes, arm_filter, args):
         # изображение Tk стоит дорого, а распознавание идёт своим темпом.
         if frame is not None and frame_id != state["shown_frame"]:
             state["shown_frame"] = frame_id
-            if not zeroed["value"]:
+            if time.monotonic() < state.get("flag_until", 0.0):
+                joint_state = "флаг"
+            elif not zeroed["value"]:
                 joint_state = "нет нуля"
             elif paused["value"] or relaxed["value"] or loop.error_text:
                 joint_state = "стоп"
@@ -1827,9 +1837,15 @@ def run_gui(loop, source, axes, arm_filter, args):
         через root.after. Трогать интерфейс Tk из чужого потока нельзя —
         он от этого падает не сразу, а позже и в непонятном месте.
         """
+        def raise_flag() -> None:
+            # Держится 15 секунд и гаснет сама: отдельная команда на
+            # выключение — лишний повод перепутаться голосом.
+            state["flag_until"] = time.monotonic() + 15.0
+
         actions = {"стоп": emergency_stop,
                    "старт": lambda: (toggle_pause() if paused["value"] else None),
-                   "нули": set_middle}
+                   "россия": set_middle,
+                   "флаг": raise_flag}
         action = actions.get(command)
         if action is not None:
             root.after(0, action)
