@@ -22,7 +22,15 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 
 def main() -> int:
+    import argparse
     import os
+
+    # Разбор аргументов нужен не ради самих аргументов, а ради --help:
+    # по нему проверяется, что скрипт цел, и без него самопроверка
+    # запускала бы настоящий опрос камеры и падала без прав root.
+    argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter).parse_args()
 
     print("=== проверка RealSense ===\n")
 
