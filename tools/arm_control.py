@@ -595,27 +595,30 @@ class RealSenseFrames:
         log.info("вариантов режима: %d, первым пробую %dx%d@%d",
                  len(modes), *modes[0])
         self.pipeline = None
+        cached = self._load_mode()
+
+        # Если режим из кэша уже работал, а сейчас не идёт — дело не в
+        # режиме, а в занятой камере. Перебирать остальные бессмысленно:
+        # они провалятся по той же причине, потратив по полторы секунды
+        # каждый. Сразу сбрасываем устройство и повторяем кэш.
+        if cached and cached in modes:
+            if self._try_modes([cached]):
+                return
+            log.warning("режим из прошлого запуска не пошёл — похоже, камера "
+                        "занята. Сбрасываю, не перебирая остальные")
+            if self._reset_device() and self._try_modes([cached]):
+                log.info("после сброса открылась на прежнем режиме")
+                return
+            modes = [m for m in modes if m != cached]
+
         if self._try_modes(modes):
             return
 
-        # Устройство осталось занято с прошлого запуска: со стороны это
-        # выглядит как «первый раз работает, дальше нет». Сбрасываем его
-        # и пробуем ещё раз — это дешевле, чем передёргивать кабель.
         log.warning("камера не отдала кадр ни на одном режиме, "
                     "сбрасываю устройство")
-        try:
-            devices[0].hardware_reset()
-        except Exception as exc:
-            log.warning("сброс не удался: %s", exc)
-        else:
-            time.sleep(4.0)          # даёт камере переподключиться
-            subprocess.run(["killall", "VDCAssistant"],
-                           capture_output=True, check=False)
-            self._context = rs.context()
-            devices = list(self._context.query_devices())
-            if devices and self._try_modes(modes):
-                log.info("после сброса камера открылась")
-                return
+        if self._reset_device() and self._try_modes(modes):
+            log.info("после сброса камера открылась")
+            return
 
         raise SystemExit(
             "камера не отдала кадр ни на одном режиме, сброс не помог:\n"
@@ -627,6 +630,30 @@ class RealSenseFrames:
     #: со стороны это неотличимо от зависшей программы. Полутора секунд
     #: рабочему режиму хватает с запасом: камера отдаёт кадры сразу.
     PROBE_TIMEOUT_MS = 1500
+
+    def _reset_device(self) -> bool:
+        """Сбросить камеру и заново её найти.
+
+        Помогает, когда устройство осталось занято незакрытым прошлым
+        запуском: дешевле, чем передёргивать кабель.
+        """
+        import subprocess
+
+        rs = self._rs
+        try:
+            devices = list(self._context.query_devices())
+            if not devices:
+                return False
+            devices[0].hardware_reset()
+        except Exception as exc:
+            log.warning("сброс не удался: %s", exc)
+            return False
+
+        time.sleep(4.0)              # даёт камере переподключиться
+        subprocess.run(["killall", "VDCAssistant"],
+                       capture_output=True, check=False)
+        self._context = rs.context()
+        return bool(list(self._context.query_devices()))
 
     def _try_modes(self, modes) -> bool:
         """Пройти по режимам, вернуть True на первом, отдавшем кадр."""
