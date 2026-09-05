@@ -1501,6 +1501,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         """
         paused["value"] = True
         relaxed["value"] = False
+        stop_anthem()
         loop.set_armed(False)
         loop.freeze()
         pause_button.config(text="ПРОДОЛЖИТЬ")
@@ -1848,6 +1849,33 @@ def run_gui(loop, source, axes, arm_filter, args):
                  f"{source.funnel.report()}   |   {note}{tail}",
             foreground="#e05252" if errors else "#888")
 
+    def play_anthem() -> None:
+        """Проиграть запись, не блокируя ни окно, ни контур.
+
+        Запускается отдельным процессом и не ожидается: проигрывание
+        длится минуты, а окно всё это время должно отвечать — в том числе
+        кнопкой останова.
+        """
+        import subprocess
+
+        track = Path(__file__).resolve().parents[1] / "sounds" / "anthem.ogg"
+        if not track.is_file():
+            log.warning("нет записи: %s", track)
+            return
+        if state.get("anthem") and state["anthem"].poll() is None:
+            return                      # уже играет, второй раз не начинаем
+        try:
+            state["anthem"] = subprocess.Popen(
+                ["afplay", str(track)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            log.warning("не удалось проиграть: %s", exc)
+
+    def stop_anthem() -> None:
+        process = state.get("anthem")
+        if process is not None and process.poll() is None:
+            process.terminate()
+
     def on_voice(command: str) -> None:
         """Голосовая команда. Приходит из потока распознавания.
 
@@ -1856,9 +1884,9 @@ def run_gui(loop, source, axes, arm_filter, args):
         он от этого падает не сразу, а позже и в непонятном месте.
         """
         def raise_flag() -> None:
-            # Держится 15 секунд и гаснет сама: отдельная команда на
-            # выключение — лишний повод перепутаться голосом.
-            state["flag_until"] = time.monotonic() + 15.0
+            # Держится, пока играет запись, но не меньше 15 секунд.
+            state["flag_until"] = time.monotonic() + max(15.0, args.anthem_seconds)
+            play_anthem()
 
         actions = {"стоп": emergency_stop,
                    "старт": lambda: (toggle_pause() if paused["value"] else None),
@@ -1886,6 +1914,7 @@ def run_gui(loop, source, axes, arm_filter, args):
             voice = None
 
     def shutdown():
+        stop_anthem()
         if voice is not None:
             voice.stop()
         if journal_file is not None:
@@ -2023,6 +2052,8 @@ def main() -> int:
                         "веб-камеры; нужен sudo и питон из arm_realsense")
     p.add_argument("--list-cameras", action="store_true",
                    help="показать доступные камеры и выйти")
+    p.add_argument("--anthem-seconds", type=float, default=210.0,
+                   help="сколько держать раскраску под запись")
     p.add_argument("--no-voice", action="store_true",
                    help="выключить голосовые команды")
     p.add_argument("--audio-device", type=int, default=0,
