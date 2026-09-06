@@ -194,6 +194,20 @@ class ArmFilter:
     adaptive: bool = True
     min_cutoff: float = 1.0         # сила сглаживания в покое
     beta: float = 0.02              # как быстро отпускает на движении
+
+    #: На сколько миллисекунд заглядывать вперёд.
+    #:
+    #: Между тем, как рука заняла положение, и тем, как туда приедет ось,
+    #: проходит заметное время: кадр, распознавание, фильтр, обмен по
+    #: шине. Пока всё это идёт, рука уже ушла дальше — отсюда постоянное
+    #: отставание, которое никаким ускорением контура не убрать, потому
+    #: что оно не в контуре.
+    #:
+    #: Лечится не скоростью, а предсказанием: зная скорость руки, можно
+    #: целиться туда, где она ОКАЖЕТСЯ к моменту приезда. Расплата —
+    #: перелёт на резких сменах направления, поэтому упреждение берут
+    #: меньше полной задержки.
+    lead_ms: float = 0.0
     max_len_change: float = 0.25    # скачок длины звена за кадр
     max_jump_deg: float = 45.0      # скачок угла за кадр, больше — отбросить
 
@@ -250,6 +264,7 @@ class ArmFilter:
         self._q2.append(angles.q2_deg)
         median = (_circular_median(self._q1), _circular_median(self._q2))
 
+        rate = (self._euro[0]._rate, self._euro[1]._rate)   # град/с
         if self.adaptive:
             # dt можно передать явно — это нужно для проверок, где кадры
             # подаются без пауз и часы показали бы микросекунды.
@@ -259,6 +274,12 @@ class ArmFilter:
                 self._stamp = now
             self._out = (self._euro[0].update(median[0], dt),
                          self._euro[1].update(median[1], dt))
+            if self.lead_ms:
+                ahead = self.lead_ms / 1000.0
+                self._out = (
+                    wrap180(self._out[0] + self._euro[0]._rate * ahead),
+                    wrap180(self._out[1] + self._euro[1]._rate * ahead),
+                )
         elif self._out is None:
             self._out = median
         else:

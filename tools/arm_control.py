@@ -2121,6 +2121,10 @@ def main() -> int:
                    help="куда писать журнал; по умолчанию в logs/")
     p.add_argument("--no-record", action="store_true",
                    help="не вести журнал вовсе")
+    p.add_argument("--lead", type=float, default=0.0, metavar="МС",
+                   help="упреждение: целиться туда, где рука окажется. "
+                        "Помогает против отставания, платит перелётом на "
+                        "резких сменах направления. Начните со 100")
     p.add_argument("--median", type=int, default=3,
                    help="кадров в медианном окне; гасит срывы точек")
     p.add_argument("--min-cutoff", type=float, default=1.0,
@@ -2299,7 +2303,7 @@ def main() -> int:
     arm_filter = ArmFilter(median_window=args.median,
                            adaptive=not args.fixed_smoothing,
                            min_cutoff=args.min_cutoff, beta=args.beta,
-                           smoothing=args.smoothing,
+                           smoothing=args.smoothing, lead_ms=args.lead,
                            max_len_change=float("inf"),
                            max_jump_deg=float("inf"))
 
