@@ -1993,7 +1993,12 @@ def run_gui(loop, source, axes, arm_filter, args):
                 bar = "▁▂▃▄▅▆▇█"
                 filled = min(len(bar) - 1,
                              int(voice.level / max(args.voice_level, 1) * 4))
+                # Причину отказа показываем текстом. «Отброшено 7» само
+                # по себе ничего не говорит: непонятно, то ли слово тихое,
+                # то ли распознаватель разложил по командам чужую речь, —
+                # а лечится это разными ручками.
                 tail = (f"  отброшено {voice.rejected}"
+                        f" ({voice.last_rejected})"
                         if voice.rejected else "")
                 voice_label.config(
                     text=f"голос {voice.status}  {bar[filled]}  "
