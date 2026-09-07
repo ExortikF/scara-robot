@@ -315,22 +315,34 @@ class PoseArmSource:
         self.last_frame = None
         self.last_points = None
         self.note = ""
+        self.camera_ms = 0.0        # сколько ждали кадр от камеры
+        self.detect_ms = 0.0        # сколько считали позу
         self.funnel = Funnel()
 
     def poll(self):
-        """Вернуть ((плечо), (локоть), (запястье)) в пикселях или None."""
+        """Вернуть ((плечо), (локоть), (запястье)) в пикселях или None.
+
+        Попутно замеряется, СКОЛЬКО ушло на камеру и сколько на
+        распознавание. Без разделения «упали кадры» разобрать нельзя:
+        камера могла начать отдавать кадры реже, а могло подорожать
+        распознавание — лечится это разным.
+        """
+        начало = time.monotonic()
         ok, frame = self._capture.read()
+        self.camera_ms = (time.monotonic() - начало) * 1000
         if not ok:
             self.note = "камера не отдала кадр"
             self.funnel.lost(self.note)
             return None
         self.funnel.hit("кадров")
 
+        начало = time.monotonic()
         frame = self._cv2.flip(frame, 1)
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         result = self._landmarker.detect_for_video(
             image, int((time.monotonic() - self._start) * 1000))
+        self.detect_ms = (time.monotonic() - начало) * 1000
 
         self.last_frame = rgb
         if not result.pose_landmarks:
@@ -406,6 +418,8 @@ class MarkerArmSource:
         self.last_frame = None
         self.last_points = None
         self.note = ""
+        self.camera_ms = 0.0        # сколько ждали кадр от камеры
+        self.detect_ms = 0.0        # сколько считали позу
         self.funnel = Funnel()
 
     def _find(self, hsv, spec):
@@ -1442,6 +1456,8 @@ class StubSource:
 
         self.funnel = Funnel()
         self.note = ""
+        self.camera_ms = 0.0        # сколько ждали кадр от камеры
+        self.detect_ms = 0.0        # сколько считали позу
         self.last_frame = np.zeros((240, 320, 3), dtype=np.uint8)
         self.last_points = ((80.0, 180.0), (160.0, 120.0), (240.0, 150.0))
 
@@ -1755,7 +1771,11 @@ def run_gui(loop, source, axes, arm_filter, args):
     if record_path:
         import csv
         journal_file = open(record_path, "w", newline="", encoding="utf-8")
+        # Кадры и обмен по шине пишутся рядом НАМЕРЕННО. «Просело всё»
+        # разбирается только так: видно, что именно выросло — ожидание
+        # кадра, распознавание или обход шины, — а это три разные беды.
         columns = ["t", "событие", "обмен_мс",
+                   "кадров_с", "камера_мс", "поза_мс", "кадр_мс",
                    "рука_q1", "рука_q2", "отн_q1", "отн_q2"]
         for axis in axes:
             short = axis.name.split()[0]
@@ -1840,6 +1860,10 @@ def run_gui(loop, source, axes, arm_filter, args):
                    else "едет")
                   for a in axes},
                **{f"обмен_мс": loop.sweep_ms},
+               кадров_с=worker.fps,
+               камера_мс=source.camera_ms,
+               поза_мс=source.detect_ms,
+               кадр_мс=worker.poll_ms,
                рука_q1=smoothed[0], рука_q2=smoothed[1],
                отн_q1=relative[0], отн_q2=relative[1],
                **{f"вал_{a.name.split()[0]}": loop.followers[a.name].telemetry.actual_deg
@@ -2012,8 +2036,13 @@ def run_gui(loop, source, axes, arm_filter, args):
         tail = ""
         if errors:
             tail = f"   СБОЕВ {errors}: {worker.last_error or state['last_error']}"
+        # Разбивка по этапам стоит места на экране: «просело до 8 к/с» без
+        # неё ничего не говорит, а «камера 95 мс, поза 12 мс» говорит всё.
         detector.config(
-            text=f"распознавание {worker.fps:.0f} к/с ({worker.poll_ms:.0f} мс)   "
+            text=f"распознавание {worker.fps:.0f} к/с "
+                 f"(кадр {worker.poll_ms:.0f} мс = камера "
+                 f"{source.camera_ms:.0f} + поза {source.detect_ms:.0f})   "
+                 f"шина {loop.sweep_ms:.0f} мс   "
                  f"{source.funnel.report()}   |   {note}{tail}",
             foreground="#e05252" if errors else "#888")
 
