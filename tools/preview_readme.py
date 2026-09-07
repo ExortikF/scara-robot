@@ -58,7 +58,7 @@ hr { border: 0; border-top: 1px solid #d0d7de; margin: 24px 0; }
 """
 
 
-def подменить_картинки(html: str) -> tuple[str, list[str]]:
+def подменить_картинки(html: str, рядом: Path) -> tuple[str, list[str]]:
     """Отсутствующие картинки заменить рамкой с именем файла.
 
     Иначе браузер покажет сломанный значок, и по нему не понять, то ли
@@ -71,7 +71,10 @@ def подменить_картинки(html: str) -> tuple[str, list[str]]:
     def замена(совпадение: re.Match) -> str:
         тег = совпадение.group(0)
         путь = совпадение.group(1)
-        if путь.startswith(("http://", "https://")) or (КОРЕНЬ / путь).exists():
+        # Пути в README отсчитываются от папки самого README, а не от
+        # корня проекта: иначе чужой файл — например профильный —
+        # показывается без единой картинки.
+        if путь.startswith(("http://", "https://")) or (рядом / путь).exists():
             return тег
         пропало.append(путь)
         подпись = re.search(r'alt="([^"]*)"', тег)
@@ -94,13 +97,16 @@ def main() -> int:
 
     текст = args.файл.read_text(encoding="utf-8")
     тело = markdown.markdown(текст, extensions=["tables", "fenced_code"])
-    тело, пропало = подменить_картинки(тело)
+    рядом = args.файл.resolve().parent
+    тело, пропало = подменить_картинки(тело, рядом)
 
     страница = (f"<!doctype html><html lang=ru><head><meta charset=utf-8>"
                 f"<title>{args.файл.name}</title><style>{СТИЛЬ}</style>"
                 f"</head><body>{тело}</body></html>")
 
-    куда = КОРЕНЬ / "docs" / "media" / "просмотр.html"
+    # Страница кладётся рядом с README — тогда относительные ссылки на
+    # картинки в ней работают без переписывания.
+    куда = рядом / "просмотр.html"
     куда.write_text(страница, encoding="utf-8")
 
     print(f"страница собрана: {куда}")
