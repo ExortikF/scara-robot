@@ -2158,7 +2158,8 @@ def run_gui(loop, source, axes, arm_filter, args):
         try:
             from scara_drive.voice import VoiceCommands
             voice = VoiceCommands(on_voice, device=args.audio_device,
-                                  silence_level=args.voice_level)
+                                  silence_level=args.voice_level,
+                                  model_dir=args.voice_model)
             voice.bias = args.voice_bias
             voice.start()
         except SystemExit as exc:
@@ -2362,6 +2363,12 @@ def main() -> int:
                    help="выключить голосовые команды")
     p.add_argument("--audio-device", type=int, default=0,
                    help="номер микрофона; список — tools/mics.py")
+    p.add_argument("--voice-model", type=Path, default=None, metavar="ПАПКА",
+                   help="папка другой модели распознавания речи. Большая "
+                        "(models/vosk-model-ru-0.42) точнее на шумном фоне, "
+                        "но грузится 16 секунд при каждом запуске и занимает "
+                        "3.5 ГБ. Процессор она почти не ест — 6%% реального "
+                        "времени против 1%%, на кадры не влияет")
     p.add_argument("--voice-bias", type=float, default=0.0,
                    help="сдвиг порогов распознавания: минус — принимать "
                         "охотнее, плюс — строже")

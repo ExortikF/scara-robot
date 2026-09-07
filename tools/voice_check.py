@@ -27,6 +27,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import wave
 from pathlib import Path
 
@@ -100,6 +101,8 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--подробно", action="store_true",
                    help="показать разбор каждой записи")
+    p.add_argument("--модель", type=Path, default=None,
+                   help="папка другой модели — чтобы сравнить с нынешней")
     args = p.parse_args()
 
     try:
@@ -108,12 +111,16 @@ def main() -> int:
         print("нет vosk — проверять нечем. "
               "Запускайте через ./.venv-rs/bin/python")
         return 0
-    if not MODEL_DIR.is_dir():
-        print(f"нет модели распознавания: {MODEL_DIR}")
+    папка = args.модель or MODEL_DIR
+    if not папка.is_dir():
+        print(f"нет модели распознавания: {папка}")
         return 0
 
     vosk.SetLogLevel(-1)
-    модель = vosk.Model(str(MODEL_DIR))
+    начало_загрузки = time.monotonic()
+    модель = vosk.Model(str(папка))
+    print(f"модель: {папка.name}, загрузилась за "
+          f"{time.monotonic() - начало_загрузки:.1f} с\n")
     словарь = sorted({w for ws in COMMANDS.values() for w in ws})
     грамматика = json.dumps(словарь + ["[unk]"], ensure_ascii=False)
 
