@@ -1223,6 +1223,7 @@ def preflight_line(transport: SerialConfig) -> None:
     return
 
 
+CALIBRATION_FILE = Path(__file__).with_name("arm_calibration.json")
 HOME_FILE = Path(__file__).with_name("arm_home.json")
 
 
@@ -1423,12 +1424,43 @@ def run_test_move(loop, axes, degrees: float, seconds: float) -> int:
     return 0
 
 
+class StubSource:
+    """Источник-заглушка для проверки окна без камеры.
+
+    Окно строится один раз и в одном месте, но именно там живут ошибки,
+    которых не видно ни компиляцией, ни доктестами: не определённая
+    переменная, использованная до присваивания, опечатка в имени кнопки.
+    Такие ошибки дважды подряд уходили в работу, потому что проверялся
+    только разбор аргументов.
+    """
+
+    name = "заглушка"
+    MIN_VISIBILITY = 0.5
+
+    def __init__(self):
+        import numpy as np
+
+        self.funnel = Funnel()
+        self.note = ""
+        self.last_frame = np.zeros((240, 320, 3), dtype=np.uint8)
+        self.last_points = ((80.0, 180.0), (160.0, 120.0), (240.0, 150.0))
+
+    def poll(self):
+        for stage in ("кадров", "поза найдена", "точки видны"):
+            self.funnel.hit(stage)
+        return self.last_points
+
+    def close(self):
+        pass
+
+
 def run_gui(loop, source, axes, arm_filter, args):
     import tkinter as tk
     from tkinter import ttk
     from PIL import Image, ImageTk
 
     keep = {}
+    home = load_home()          # нужен до создания кнопки
     paused = {"value": True}          # стартуем на паузе: сначала проверьте картинку
     zero = {"q1": 0.0, "q2": 0.0}     # поза, принятая за ноль
 
@@ -1510,7 +1542,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         if paused["value"]:
             # Пауза обязана именно останавливать. Замораживать цель мало:
             # старая цель осталась бы в силе, и ось продолжила бы ехать.
-            loop.freeze()
+            on_bus("пауза", loop.freeze)
 
     def emergency_stop():
         """Остановить движение, но не убивать программу.
@@ -1522,7 +1554,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         paused["value"] = True
         relaxed["value"] = False
         loop.set_armed(False)
-        loop.freeze()
+        on_bus("стоп", loop.freeze)
         pause_button.config(text="ПРОДОЛЖИТЬ")
         relax_button.config(text="РАССЛАБИТЬ")
         status.config(text="ОСТАНОВЛЕНО. Оси стоят под током. "
@@ -1594,7 +1626,7 @@ def run_gui(loop, source, axes, arm_filter, args):
             return
         state["homing"] = False
         loop.set_armed(False)
-        loop.freeze()
+        on_bus("возврат", loop.freeze)
         status.config(
             text=("возврат прерван: " + loop.error_text) if loop.error_text
             else "в исходном положении. «ПРОДОЛЖИТЬ» — снова за рукой",
@@ -1610,18 +1642,24 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     def clear_fault():
         """Снять аварию и вернуть контур в работу — но только на паузе."""
-        if not loop.clear_fault():
-            status.config(text="аварии нет — сбрасывать нечего", foreground="")
-            return
-        paused["value"] = True
-        pause_button.config(text="ПРОДОЛЖИТЬ")
-        status.config(text="авария снята, оси стоят на месте. Проверьте "
-                           "причину, потом снимайте паузу.", foreground="")
+        def done(cleared):
+            if not cleared:
+                status.config(text="аварии нет — сбрасывать нечего",
+                              foreground="")
+                return
+            paused["value"] = True
+            pause_button.config(text="ПРОДОЛЖИТЬ")
+            status.config(text="авария снята, оси стоят на месте. Проверьте "
+                               "причину, потом снимайте паузу.", foreground="")
+
+        status.config(text="снимаю аварию...", foreground="#ffb648")
+        on_bus("снятие аварии", loop.clear_fault, done)
 
     def toggle_relax():
         """Снять момент, чтобы двигать руку робота вручную, и вернуть обратно."""
         relaxed["value"] = not relaxed["value"]
-        loop.set_relaxed(relaxed["value"])
+        want = relaxed["value"]
+        on_bus("момент", lambda: loop.set_relaxed(want))
         relax_button.config(text="ЗАЖАТЬ" if relaxed["value"] else "РАССЛАБИТЬ")
 
         if relaxed["value"]:
@@ -1644,17 +1682,21 @@ def run_gui(loop, source, axes, arm_filter, args):
             status.config(text="руку не вижу — нечего принимать за середину",
                           foreground="#ffb648")
             return
-        zero["q1"], zero["q2"] = current
-        loop.set_zero_here()
-        zeroed["value"] = True
+        def done(_result):
+            zero["q1"], zero["q2"] = current
+            zeroed["value"] = True
+            saved = {name: follower.zero_offset_counts
+                     for name, follower in loop.followers.items()}
+            save_calibration(saved)
+            status.config(text=f"середина выставлена: плечо {zero['q1']:.0f}°, "
+                               f"локоть {zero['q2']:.0f}°. Сохранено, "
+                               f"можно снимать паузу.", foreground="")
 
-        saved = {name: follower.zero_offset_counts
-                 for name, follower in loop.followers.items()}
-        save_calibration(saved)
-
-        status.config(text=f"середина выставлена: плечо {zero['q1']:.0f}°, "
-                           f"локоть {zero['q2']:.0f}°. Сохранено, "
-                           f"можно снимать паузу.", foreground="")
+        # Середину запоминаем только после того, как оси реально
+        # опрошены: иначе при сбое связи ноль считался бы выставленным, а
+        # смещение осталось бы прежним — и цель поехала бы от чужого угла.
+        status.config(text="опрашиваю оси...", foreground="#ffb648")
+        on_bus("середина", loop.set_zero_here, done)
 
     def use_saved():
         """Взять середину осей из файла, а позу руки — текущую."""
@@ -1724,9 +1766,41 @@ def run_gui(loop, source, axes, arm_filter, args):
         journal.writeheader()
         log.info("журнал: %s", record_path)
     zeroed = {"value": False}
-    home = load_home()
     relaxed = {"value": False}
     show_diag = {"value": False}
+    pending: list = []
+
+    def on_bus(label, action, then=None):
+        """Выполнить работу с шиной в потоке контура, не блокируя окно.
+
+        Кнопки «середина здесь», пауза, «расслабить» читают положение всех
+        осей. Каждое чтение — обмен по RS-485 в очереди за обходом контура;
+        три подряд при вялом переходнике складываются в секунды. Пока это
+        делалось прямо в обработчике кнопки, окно на это время замирало и
+        система считала программу зависшей.
+
+        Продолжение ``then`` вызывается уже в потоке окна — ему можно
+        трогать виджеты.
+        """
+        request = loop.submit(label, action)
+        pending.append((request, then))
+        return request
+
+    def serve_pending() -> None:
+        """Разобрать выполненные поручения. Вызывается из потока окна."""
+        for item in list(pending):
+            request, then = item
+            if not request.done.is_set():
+                continue
+            pending.remove(item)
+            if request.error:
+                state["errors"] += 1
+                state["last_error"] = f"{request.label}: {request.error}"
+                status.config(text=f"{request.label}: {request.error}",
+                              foreground="#e05252")
+                continue
+            if then is not None:
+                then(request.result)
 
     def record(kind: str, **fields) -> None:
         """Записать строку в журнал, если он включён.
@@ -1778,6 +1852,7 @@ def run_gui(loop, source, axes, arm_filter, args):
 
     def draw():
         try:
+            serve_pending()
             draw_once()
         except Exception as exc:
             state["errors"] += 1
@@ -1986,6 +2061,44 @@ def run_gui(loop, source, axes, arm_filter, args):
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", shutdown)
+
+    if getattr(args, "smoke", None):
+        # Tk сам ловит сбой обработчика, печатает его и живёт дальше —
+        # поэтому упавшая кнопка не доходит ни до invoke(), ни до кода
+        # возврата. Для самопроверки перехватываем этот путь.
+        def report_callback_exception(exc_type, exc, tb):
+            state["errors"] += 1
+            state["last_error"] = f"обработчик: {exc_type.__name__}: {exc}"
+            log.error(state["last_error"])
+
+        root.report_callback_exception = report_callback_exception
+
+        def smoke_run():
+            """Прожать кнопки и закрыться. Только для самопроверки.
+
+            Собрать окно мало: оба последних падения жили не в сборке, а в
+            обработчиках — «СЕРЕДИНА ЗДЕСЬ» и «ИСХОДНОЕ». Пока кнопки
+            никто не трогал, проверка их не видела.
+            """
+            # Часть кнопок пересобирает панель, и старые виджеты умирают.
+            for button in list(buttons.winfo_children()):
+                if not button.winfo_exists():
+                    continue
+                try:
+                    button.invoke()
+                    root.update()
+                except Exception as exc:
+                    # Tk обычно печатает сбой обработчика и живёт дальше.
+                    # Для самопроверки это ровно то, что нельзя проглядеть.
+                    state["errors"] += 1
+                    state["last_error"] = (f"кнопка "
+                                           f"{button.cget('text')!r}: "
+                                           f"{type(exc).__name__}: {exc}")
+                    log.error(state["last_error"])
+            root.after(int(args.smoke * 1000), shutdown)
+
+        root.after(300, smoke_run)
+
     loop.set_armed(False)          # окно открывается с запрещённым движением
     loop.start()
     worker.start()
@@ -1996,6 +2109,11 @@ def run_gui(loop, source, axes, arm_filter, args):
         worker.stop()
         loop.stop()
         source.close()
+
+    if getattr(args, "smoke", None) and state["errors"]:
+        log.error("самопроверка окна: сбоев %d, последний — %s",
+                  state["errors"], state["last_error"])
+        return 1
     return 0
 
 
@@ -2077,6 +2195,9 @@ def main() -> int:
     p.add_argument("--side", choices=["left", "right"], default="right",
                    help="какой рукой управляете (для источника pose)")
     p.add_argument("--simulate", action="store_true")
+    p.add_argument("--smoke", type=float, metavar="СЕК",
+                   help="построить окно с заглушкой вместо камеры и закрыть "
+                        "через столько секунд; для самопроверки")
     p.add_argument("--confirm", action="store_true",
                    help="подтвердить, что оси разгружены")
 
@@ -2206,6 +2327,9 @@ def main() -> int:
             print(f"    open {shots}")
         return 0
 
+    if args.smoke:
+        args.simulate = True
+        args.no_voice = True
     if not (args.simulate or args.confirm or args.diag
             or args.test_move is not None):
         print(__doc__)
@@ -2283,12 +2407,16 @@ def main() -> int:
                 finally:
                     bus.close()
 
-    source = (PoseArmSource(args.camera, args.side, realsense=args.realsense,
+    if args.smoke:
+        source = StubSource()
+    else:
+        source = (PoseArmSource(args.camera, args.side,
+                                realsense=args.realsense,
                                 allow_reset=args.allow_camera_reset)
-              if args.source == "pose"
-              else MarkerArmSource(args.camera, realsense=args.realsense,
-                                allow_reset=args.allow_camera_reset))
-    source.MIN_VISIBILITY = args.min_visibility
+                  if args.source == "pose"
+                  else MarkerArmSource(args.camera, realsense=args.realsense,
+                                       allow_reset=args.allow_camera_reset))
+        source.MIN_VISIBILITY = args.min_visibility
     # Кадры не отбрасываются: отсев резал нормальные движения, а картина
     # «скелет виден, робот стоит» разбиралась дольше, чем стоили пойманные
     # сбои. Шум давится двумя средствами, и роли у них разные.

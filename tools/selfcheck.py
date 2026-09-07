@@ -118,9 +118,30 @@ def check_control_loop() -> bool:
     return idle_ok and reach_ok and quiet_ok
 
 
+def check_gui() -> bool:
+    """Окно управления должно собираться целиком.
+
+    Проверки `--help` тут мало: разбор аргументов проходит, а окно потом
+    падает на не определённом имени или на переменной, использованной до
+    присваивания. Так подряд ушли в работу два падения — на сохранении
+    середины и на кнопке исходного положения. Здесь окно действительно
+    строится, с заглушкой вместо камеры, и само закрывается.
+    """
+    print("\nокно управления:")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "arm_control.py"), "--smoke", "2"],
+        capture_output=True, timeout=180)
+    if done.returncode != 0:
+        tail = done.stderr.decode(errors="replace").strip().splitlines()
+        return line(False, "окно собирается",
+                    tail[-1] if tail else "ненулевой код возврата")
+    return line(True, "окно собирается и закрывается")
+
+
 def main() -> int:
     print(f"проверка проекта в {ROOT}\n")
-    results = [check_doctests(), check_entry_points(), check_control_loop()]
+    results = [check_doctests(), check_entry_points(), check_control_loop(),
+               check_gui()]
     print()
     if all(results):
         print(f"{GREEN}всё в порядке{OFF}")

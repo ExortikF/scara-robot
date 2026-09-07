@@ -82,6 +82,7 @@ class VoiceCommands:
     #: время. Без этой отсечки оно молотит вхолостую и отбирает процессор
     #: у камеры: кадров становится заметно меньше.
     SILENCE_LEVEL = 300          # среднее по модулю, шкала int16
+    QUEUE_CHUNKS = 8             # звука в запасе, ~2 с при блоке 4000
 
     def __init__(self, on_command: Callable[[str], None],
                  model_dir: Path | None = None, device: int | None = 0,
@@ -122,7 +123,14 @@ class VoiceCommands:
         vocabulary = sorted({w for words in COMMANDS.values() for w in words})
         self._grammar = json.dumps(vocabulary + ["[unk]"], ensure_ascii=False)
 
-        self._queue: queue.Queue[bytes] = queue.Queue()
+        # Очередь ограничена намеренно. Распознавание временами не
+        # успевает за реальным временем, и с неограниченной очередью
+        # отставание уже не рассасывается: поток жуёт накопленный звук на
+        # полном ходу, отнимает процессор у распознавания руки — кадры
+        # проседают, — а команда всё равно приходит с опозданием и не
+        # нужна. Лучше выбросить самый старый кусок и слушать живой звук.
+        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=self.QUEUE_CHUNKS)
+        self.dropped = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.heard = 0
@@ -206,7 +214,18 @@ class VoiceCommands:
     def _feed(self, indata, frames, time_info, status) -> None:
         if status:
             log.debug("микрофон: %s", status)
-        self._queue.put(bytes(indata))
+        try:
+            self._queue.put_nowait(bytes(indata))
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.dropped += 1
+            try:
+                self._queue.put_nowait(bytes(indata))
+            except queue.Full:
+                pass
 
     def _worker(self) -> None:
         recognizer = self._vosk.KaldiRecognizer(

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -672,6 +673,33 @@ class AngleFollower:
         self.stop()
 
 
+class Request:
+    """Поручение, выполняемое потоком контура.
+
+    Окно кладёт его в очередь и продолжает рисовать. Готовность и ошибку
+    забирает потом: ``done`` взводится в любом случае, даже когда действие
+    упало, иначе окно ждало бы вечно.
+    """
+
+    __slots__ = ("label", "action", "done", "error", "result")
+
+    def __init__(self, label: str, action):
+        self.label = label
+        self.action = action
+        self.done = threading.Event()
+        self.error: str | None = None
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = self.action()
+        except Exception as exc:
+            self.error = f"{type(exc).__name__}: {exc}"
+            log.exception("поручение «%s» не выполнено", self.label)
+        finally:
+            self.done.set()
+
+
 class MultiAxisFollower:
     """Несколько осей на одной шине RS-485, один поток, обход по кругу.
 
@@ -698,6 +726,38 @@ class MultiAxisFollower:
         self.sweeps = 0
         self.dropped = 0
         self.sweep_ms = 0.0
+        self._requests: queue.Queue[Request] = queue.Queue()
+
+    # --- поручения потоку контура ----------------------------------------
+
+    def submit(self, label: str, action) -> "Request":
+        """Отдать поручение потоку контура и сразу вернуть управление.
+
+        Кнопки окна — «середина здесь», пауза, снять момент — трогают шину.
+        Из потока Tk это делать нельзя: шина занята обходом, замок держится
+        весь обмен, и окно на всё это время перестаёт отвечать. Три чтения
+        позиции подряд при вялом переходнике — это уже секунды, и система
+        считает программу зависшей.
+
+        Поручение выполняется между обходами, когда шина свободна.
+        Результат вызывающий забирает по готовности, не блокируя окно.
+        """
+        request = Request(label, action)
+        if self._thread is not None and self._thread.is_alive():
+            self._requests.put(request)
+        else:
+            # Контур не крутится — очередь разбирать некому. Всё равно не в
+            # потоке окна: обмен по шине долгий и без обхода.
+            threading.Thread(target=request.run, daemon=True).start()
+        return request
+
+    def _serve_requests(self) -> None:
+        while True:
+            try:
+                request = self._requests.get_nowait()
+            except queue.Empty:
+                return
+            request.run()
 
     def ensure_running(self) -> None:
         """Поднять поток контура, если он остановлен.
@@ -831,6 +891,8 @@ class MultiAxisFollower:
         while not self._stop.is_set():
             start = time.monotonic()
             failed = []
+
+            self._serve_requests()
 
             for name, follower in self.followers.items():
                 if self._stop.is_set():
