@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" width="900" height="470"
+     font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    :root { color-scheme: light dark; }
+    .ground { fill: #ffffff; }
+    .card   { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .accent { fill: #eaf3ff; stroke: #4a90d9; stroke-width: 1.5; }
+    .robot  { fill: #e9f9ef; stroke: #2da44e; stroke-width: 1.5; }
+    .title  { fill: #1f2328; font-size: 15px; font-weight: 600; }
+    .sub    { fill: #59636e; font-size: 12px; }
+    .lane   { fill: #8c959f; font-size: 11px; font-weight: 600; letter-spacing: .08em; }
+    .wire   { stroke: #8c959f; stroke-width: 2; fill: none; }
+    .wire-a { stroke: #4a90d9; stroke-width: 2.5; fill: none; }
+    .note   { fill: #59636e; font-size: 11px; font-style: italic; }
+    @media (prefers-color-scheme: dark) {
+      .ground { fill: #0d1117; }
+      .card   { fill: #161b22; stroke: #30363d; }
+      .accent { fill: #12233a; stroke: #4a90d9; }
+      .robot  { fill: #0f2417; stroke: #2da44e; }
+      .title  { fill: #e6edf3; }
+      .sub    { fill: #9198a1; }
+      .lane   { fill: #6e7681; }
+      .wire   { stroke: #6e7681; }
+      .note   { fill: #9198a1; }
+    }
+  </style>
+
+  <rect class="ground" x="0" y="0" width="900" height="470"/>
+
+  <text class="lane" x="30" y="34">ЧТО ВИДИМ И СЛЫШИМ</text>
+  <text class="lane" x="30" y="196">ЧТО СЧИТАЕМ</text>
+  <text class="lane" x="30" y="358">ЧЕМ ДВИГАЕМ</text>
+
+  <!-- вход -->
+  <g>
+    <rect class="accent" x="30" y="48" width="200" height="76" rx="10"/>
+    <text class="title" x="48" y="76">Камера сверху</text>
+    <text class="sub"   x="48" y="97">RealSense, только цвет</text>
+    <text class="sub"   x="48" y="114">640×480, 30 к/с</text>
+  </g>
+  <g>
+    <rect class="accent" x="262" y="48" width="200" height="76" rx="10"/>
+    <text class="title" x="280" y="76">MediaPipe Pose</text>
+    <text class="sub"   x="280" y="97">плечо, локоть, кисть</text>
+    <text class="sub"   x="280" y="114">свой поток, ~12 мс</text>
+  </g>
+  <g>
+    <rect class="accent" x="646" y="48" width="224" height="76" rx="10"/>
+    <text class="title" x="664" y="76">Микрофон</text>
+    <text class="sub"   x="664" y="97">vosk, офлайн, словарь</text>
+    <text class="sub"   x="664" y="114">из четырёх команд</text>
+  </g>
+
+  <!-- счёт -->
+  <g>
+    <rect class="card" x="30" y="210" width="200" height="86" rx="10"/>
+    <text class="title" x="48" y="238">Углы суставов</text>
+    <text class="sub"   x="48" y="259">q1 — плечо, q2 — локоть</text>
+    <text class="sub"   x="48" y="276">не зависят от масштаба</text>
+  </g>
+  <g>
+    <rect class="card" x="262" y="210" width="200" height="86" rx="10"/>
+    <text class="title" x="280" y="238">Фильтр</text>
+    <text class="sub"   x="280" y="259">медиана — срывы точек,</text>
+    <text class="sub"   x="280" y="276">one-euro — дрожь</text>
+  </g>
+  <g>
+    <rect class="card" x="494" y="210" width="200" height="86" rx="10"/>
+    <text class="title" x="512" y="238">Контур слежения</text>
+    <text class="sub"   x="512" y="259">три оси по кругу</text>
+    <text class="sub"   x="512" y="276">на одной шине</text>
+  </g>
+  <g>
+    <rect class="card" x="726" y="210" width="144" height="86" rx="10"/>
+    <text class="title" x="744" y="238">Защита</text>
+    <text class="sub"   x="744" y="259">упоры, ход не</text>
+    <text class="sub"   x="744" y="276">в ту сторону</text>
+  </g>
+
+  <!-- железо -->
+  <g>
+    <rect class="robot" x="262" y="372" width="200" height="76" rx="10"/>
+    <text class="title" x="280" y="400">Приводы C30 ×3</text>
+    <text class="sub"   x="280" y="421">Modbus RTU, 19200</text>
+    <text class="sub"   x="280" y="438">скоростной режим</text>
+  </g>
+  <g>
+    <rect class="robot" x="494" y="372" width="376" height="76" rx="10"/>
+    <text class="title" x="512" y="400">Механика</text>
+    <text class="sub"   x="512" y="421">плечо — редуктор 10:1, локоть — ремень 1:1.5</text>
+    <text class="sub"   x="512" y="438">энкодеры 17 бит, 131072 отсчёта на оборот</text>
+  </g>
+
+  <!-- связи -->
+  <path class="wire-a" d="M230 86 H262"/>
+  <polygon fill="#4a90d9" points="262,86 254,82 254,90"/>
+
+  <path class="wire-a" d="M130 124 V210"/>
+  <polygon fill="#4a90d9" points="130,210 126,202 134,202"/>
+  <path class="wire" d="M362 124 V186 H130" stroke-dasharray="4 4"/>
+
+  <path class="wire" d="M230 253 H262"/>
+  <polygon fill="#8c959f" points="262,253 254,249 254,257"/>
+  <path class="wire" d="M462 253 H494"/>
+  <polygon fill="#8c959f" points="494,253 486,249 486,257"/>
+  <path class="wire" d="M694 253 H726"/>
+  <polygon fill="#8c959f" points="726,253 718,249 718,257"/>
+
+  <path class="wire-a" d="M758 124 V180 H594 V210"/>
+  <polygon fill="#4a90d9" points="594,210 590,202 598,202"/>
+  <text class="note" x="606" y="176">стоп, старт, линия, положение</text>
+
+  <path class="wire" d="M594 296 V340 H362 V372"/>
+  <polygon fill="#8c959f" points="362,372 358,364 366,364"/>
+  <text class="note" x="380" y="334">задание скорости, 6 посылок на обход</text>
+
+  <path class="wire" d="M462 410 H494"/>
+  <polygon fill="#8c959f" points="494,410 486,406 486,414"/>
+
+  <!-- обратная связь -->
+  <path class="wire" d="M870 410 H884 V253 H870" stroke-dasharray="5 4"/>
+  <polygon fill="#8c959f" points="870,253 878,249 878,257"/>
+  <text class="note" x="700" y="330">положение вала обратно в контур</text>
+</svg>
