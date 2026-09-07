@@ -118,6 +118,19 @@ class VoiceCommands:
     #: срабатывание на ВСЕХ десяти обрывках.
     MAX_WORDS = 1
 
+    #: Сколько первых кусков уходит на замер фона.
+    #:
+    #: Порог тишины подобрать заранее нельзя: он зависит от микрофона,
+    #: расстояния и от того, что шумит рядом. На тележке с силовой частью
+    #: фон совсем не тот, что на столе. Поэтому первые полторы секунды
+    #: программа молча слушает и ставит порог ВЫШЕ измеренного фона —
+    #: иначе распознавание будет молотить шум и отбирать процессор у
+    #: камеры, а команды в этом шуме тонуть.
+    CALIBRATE_CHUNKS = 12
+
+    #: Во сколько раз порог выше измеренного фона.
+    CALIBRATE_FACTOR = 2.5
+
     #: Через сколько секунд ту же команду можно принять снова.
     #:
     #: Раньше повтор блокировался, пока не услышим что-то ДРУГОЕ. Сказать
@@ -250,6 +263,23 @@ class VoiceCommands:
         peak = max(abs(s) for s in samples)
         return peak < self.silence_level * self.PEAK_FACTOR
 
+    @classmethod
+    def level_for(cls, фон: list[float]) -> float:
+        """Порог тишины по замеренному фону.
+
+        Берётся не среднее, а близкое к максимуму: провалы между стуками
+        тележки — тоже фон, и равняться на них значит принимать каждый
+        стук за речь.
+
+        >>> VoiceCommands.level_for([10.0] * 12)      # тихая комната
+        150.0
+        >>> VoiceCommands.level_for([400.0] * 12)     # шумно
+        1000.0
+        """
+        фон = sorted(фон)
+        верх = фон[int(len(фон) * 0.8)]
+        return max(cls.SILENCE_LEVEL / 2, верх * cls.CALIBRATE_FACTOR)
+
     def threshold(self, command: str) -> float:
         """Порог для конкретной команды с учётом общей поправки.
 
@@ -362,10 +392,23 @@ class VoiceCommands:
                 self.status = "слушаю"
                 log.info("слушаю голос: старт, стоп, линия, положение")
                 hangover = 0
+                фон: list[float] = []
                 while not self._stop.is_set():
                     try:
                         chunk = self._queue.get(timeout=0.2)
                     except queue.Empty:
+                        continue
+
+                    if len(фон) < self.CALIBRATE_CHUNKS:
+                        self._is_silence(chunk)     # заполняет self.level
+                        фон.append(self.level)
+                        if len(фон) == self.CALIBRATE_CHUNKS:
+                            self.silence_level = self.level_for(фон)
+                            self.status = "слушаю"
+                            log.info("фон %.0f, порог тишины %.0f",
+                                     sum(фон) / len(фон), self.silence_level)
+                        else:
+                            self.status = "слушаю фон"
                         continue
                     if self._is_silence(chunk):
                         if hangover <= 0:

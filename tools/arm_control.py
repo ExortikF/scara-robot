@@ -267,16 +267,28 @@ class PoseArmSource:
     """Плечо, локоть и запястье с mediapipe Pose."""
 
     name = "pose"
-    MODEL_NAME = "pose_landmarker_full.task"
+
+    #: Три готовые модели одной и той же сети, разной величины. Чем
+    #: тяжелее, тем лучше она держит НЕПРИВЫЧНЫЙ ракурс: обучалась сеть
+    #: на кадрах «человек напротив камеры», и вид сверху для неё —
+    #: случай на отшибе. Тяжёлая считает дольше, поэтому выбор оставлен
+    #: за человеком: у кого просела частота кадров, тому она не подойдёт.
+    MODELS = {
+        "lite": "pose_landmarker_lite.task",
+        "full": "pose_landmarker_full.task",
+        "heavy": "pose_landmarker_heavy.task",
+    }
+    MODEL_NAME = MODELS["full"]
     MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-                 "pose_landmarker_full/float16/1/pose_landmarker_full.task")
+                 "pose_landmarker_{вид}/float16/1/pose_landmarker_{вид}.task")
 
     #: Ниже этого mediapipe сам не уверен в точке — такой кадр не берём.
     MIN_VISIBILITY = 0.5
 
     def __init__(self, camera_index: int = 0, side: str = "right",
                  model_path: Path | None = None, realsense: bool = False,
-                 allow_reset: bool = False):
+                 allow_reset: bool = False, model: str = "full",
+                 rotate: int = 0):
         try:
             import cv2
             import mediapipe as mp
@@ -289,15 +301,20 @@ class PoseArmSource:
         self.side = side
         self.points = POSE_POINTS[side]
 
-        model = model_path or (Path(__file__).resolve().parents[1]
-                               / "models" / self.MODEL_NAME)
-        if not model.is_file():
+        вид = model if model in self.MODELS else "full"
+        self.model_name = вид
+        self.rotate = rotate % 360
+        файл = model_path or (Path(__file__).resolve().parents[1]
+                              / "models" / self.MODELS[вид])
+        if not файл.is_file():
+            ссылка = self.MODEL_URL.format(вид=вид)
             raise SystemExit(
-                f"нет файла модели: {model}\n\n"
-                "Скачайте один раз (около 6 МБ):\n"
-                f"    mkdir -p {model.parent}\n"
-                f"    curl -L -o {model} \\\n        {self.MODEL_URL}\n"
+                f"нет файла модели: {файл}\n\n"
+                "Скачайте один раз:\n"
+                f"    mkdir -p {файл.parent}\n"
+                f"    curl -L -o {файл} \\\n        {ссылка}\n"
             )
+        model = файл
 
         options = vision.PoseLandmarkerOptions(
             base_options=mp_tasks.BaseOptions(
@@ -352,6 +369,19 @@ class PoseArmSource:
 
         начало = time.monotonic()
         frame = self._cv2.flip(frame, 1)
+        if self.rotate:
+            # Сеть училась на кадрах, где человек стоит вертикально.
+            # Камера сверху даёт лежащую фигуру, и это для сети случай на
+            # отшибе. Поворот кадра ничего не стоит и иногда возвращает
+            # позу в привычный сети вид. Углы от поворота не меняются:
+            # они считаются из направлений между точками, а поворот
+            # разворачивает все точки одинаково — но только на 180°.
+            # На 90° и 270° углы уедут ровно на этот угол, и середину
+            # придётся выставить заново.
+            коды = {90: self._cv2.ROTATE_90_CLOCKWISE,
+                    180: self._cv2.ROTATE_180,
+                    270: self._cv2.ROTATE_90_COUNTERCLOCKWISE}
+            frame = self._cv2.rotate(frame, коды[self.rotate])
         rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         result = self._landmarker.detect_for_video(
@@ -2358,6 +2388,16 @@ def main() -> int:
     p.add_argument("--diag", action="store_true",
                    help="замерить, где теряются кадры, и выйти")
     p.add_argument("--diag-seconds", type=float, default=12.0)
+    p.add_argument("--pose-model", default="full",
+                   choices=["lite", "full", "heavy"],
+                   help="какая модель позы. heavy точнее на непривычном "
+                        "ракурсе (камера сверху), но считает дольше — "
+                        "смотрите на кадры в секунду в диагностике")
+    p.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270],
+                   help="повернуть кадр перед распознаванием. Сеть училась "
+                        "на вертикально стоящем человеке; при камере сверху "
+                        "поворот иногда помогает. На 90 и 270 середину надо "
+                        "выставить заново")
     p.add_argument("--min-visibility", type=float, default=0.5,
                    help="порог видимости сустава, ниже — кадр отбрасывается")
     p.add_argument("--limit-margin", type=float, default=3.0,
@@ -2457,7 +2497,8 @@ def main() -> int:
     if args.diag:
         source = (PoseArmSource(args.camera, args.side,
                                 realsense=args.realsense,
-                                allow_reset=args.allow_camera_reset)
+                                allow_reset=args.allow_camera_reset,
+                                model=args.pose_model, rotate=args.rotate)
                   if args.source == "pose"
                   else MarkerArmSource(args.camera, realsense=args.realsense,
                                 allow_reset=args.allow_camera_reset))
@@ -2528,7 +2569,8 @@ def main() -> int:
     else:
         source = (PoseArmSource(args.camera, args.side,
                                 realsense=args.realsense,
-                                allow_reset=args.allow_camera_reset)
+                                allow_reset=args.allow_camera_reset,
+                                model=args.pose_model, rotate=args.rotate)
                   if args.source == "pose"
                   else MarkerArmSource(args.camera, realsense=args.realsense,
                                        allow_reset=args.allow_camera_reset))
