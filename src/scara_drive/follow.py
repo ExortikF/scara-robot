@@ -726,7 +726,20 @@ class MultiAxisFollower:
         self.sweeps = 0
         self.dropped = 0
         self.sweep_ms = 0.0
+        self.started_at = time.monotonic()
         self._requests: queue.Queue[Request] = queue.Queue()
+
+    @property
+    def error_rate(self) -> float:
+        """Доля обходов со сбоем связи, от 0 до 1.
+
+        Помехи от силовой части словами не ловятся: «хуже слушается» —
+        это и севшая настройка, и наводка на шину. Число различает их
+        сразу, а заодно показывает, помогло ли что-то из сделанного с
+        проводкой.
+        """
+        всего = self.sweeps + self.dropped
+        return self.dropped / всего if всего else 0.0
 
     # --- поручения потоку контура ----------------------------------------
 
@@ -873,9 +886,31 @@ class MultiAxisFollower:
         self._last_target_time = None
         self.reset_direction()
 
-    def set_zero_here(self) -> None:
-        for follower in self.followers.values():
-            follower.set_zero_here()
+    def set_zero_here(self, attempts: int = 3) -> None:
+        """Принять текущее положение за середину на всех осях.
+
+        С повторами. Одиночный сбой обмена тут дороже, чем в контуре:
+        контур своё возьмёт на следующем обходе, а нажатая кнопка просто
+        не сработает, и человек будет жать её снова, гадая, приняли ли
+        середину. На тележке с силовой частью рядом такие одиночные сбои
+        обычное дело.
+        """
+        плохо = {}
+        for имя, follower in self.followers.items():
+            for попытка in range(1, attempts + 1):
+                try:
+                    follower.set_zero_here()
+                    break
+                except Exception as exc:
+                    плохо[имя] = exc
+                    log.warning("ось %s: середина, попытка %d из %d — %s",
+                                имя, попытка, attempts, exc)
+            else:
+                continue
+            плохо.pop(имя, None)
+        if плохо:
+            раскладка = "; ".join(f"{и}: {e}" for и, e in плохо.items())
+            raise DriveFault(f"середина не снята — {раскладка}")
 
     def _worker(self) -> None:
         consecutive = 0

@@ -317,6 +317,7 @@ class PoseArmSource:
         self.note = ""
         self.camera_ms = 0.0        # сколько ждали кадр от камеры
         self.detect_ms = 0.0        # сколько считали позу
+        self.infrared = None        # None — ещё не смотрели
         self.funnel = Funnel()
 
     def poll(self):
@@ -335,6 +336,19 @@ class PoseArmSource:
             self.funnel.lost(self.note)
             return None
         self.funnel.hit("кадров")
+
+        # Проверяется один раз: у RealSense несколько входов USB, и
+        # обычный VideoCapture часто попадает на инфракрасный. Молча
+        # работать на нём нельзя — распознавание позы по серой картинке
+        # заметно хуже, а по виду окна это не отличить.
+        if self.infrared is None:
+            self.infrared = looks_infrared(frame)
+            if self.infrared:
+                log.warning(
+                    "камера отдаёт ИНФРАКРАСНЫЙ кадр, а не цветной. "
+                    "Так распознавание работает хуже. У RealSense цвет "
+                    "берётся через ./run_realsense.command; у обычной "
+                    "камеры выберите другой номер (--list-cameras)")
 
         начало = time.monotonic()
         frame = self._cv2.flip(frame, 1)
@@ -420,6 +434,7 @@ class MarkerArmSource:
         self.note = ""
         self.camera_ms = 0.0        # сколько ждали кадр от камеры
         self.detect_ms = 0.0        # сколько считали позу
+        self.infrared = None        # None — ещё не смотрели
         self.funnel = Funnel()
 
     def _find(self, hsv, spec):
@@ -910,6 +925,41 @@ class RealSenseFrames:
             self.pipeline = None
 
 
+def looks_infrared(frame) -> bool:
+    """Похож ли кадр на инфракрасный, а не на цветной.
+
+    У RealSense несколько входов USB: цветной и инфракрасные. Обычный
+    ``cv2.VideoCapture(0)`` часто попадает на инфракрасный — картинка
+    приходит серая, и распознавание позы по ней работает заметно хуже:
+    модель училась на цветных снимках.
+
+    Отличить просто: в инфракрасном кадре три канала СОВПАДАЮТ, серое
+    изображение просто разложено по трём. В цветном они расходятся даже
+    на блёклой картинке.
+
+    Проверяется по разбросу между каналами, а не по насыщенности: серая
+    стена в цвете тоже малонасыщенная, но каналы у неё всё равно чуть
+    разные.
+
+    >>> import numpy as np
+    >>> серый = np.dstack([np.full((8, 8), 120, np.uint8)] * 3)
+    >>> looks_infrared(серый)
+    True
+    >>> цветной = np.dstack([np.full((8, 8), 60, np.uint8),
+    ...                      np.full((8, 8), 120, np.uint8),
+    ...                      np.full((8, 8), 200, np.uint8)])
+    >>> looks_infrared(цветной)
+    False
+    """
+    import numpy as np
+
+    if frame is None or frame.ndim != 3 or frame.shape[2] < 3:
+        return False
+    проба = frame[::8, ::8, :3].astype(np.int16)
+    разброс = проба.max(axis=2) - проба.min(axis=2)
+    return float(разброс.mean()) < 2.0
+
+
 def open_camera(cv2, index: int):
     capture = cv2.VideoCapture(index)
     if not capture.isOpened():
@@ -1305,7 +1355,9 @@ def build_followers(args, axes):
         port = args.port or guess_port()
         if port is None:
             raise SystemExit("не нашёл переходник — укажите --port")
-        transport = SerialConfig(port=port, baudrate=args.baud, parity=args.parity)
+        transport = SerialConfig(port=port, baudrate=args.baud,
+                                 parity=args.parity, timeout=args.timeout,
+                                 retries=args.retries)
 
     if isinstance(transport, SerialConfig) and not args.skip_line_check:
         preflight_line(transport)
@@ -1458,6 +1510,7 @@ class StubSource:
         self.note = ""
         self.camera_ms = 0.0        # сколько ждали кадр от камеры
         self.detect_ms = 0.0        # сколько считали позу
+        self.infrared = None        # None — ещё не смотрели
         self.last_frame = np.zeros((240, 320, 3), dtype=np.uint8)
         self.last_points = ((80.0, 180.0), (160.0, 120.0), (240.0, 150.0))
 
@@ -2032,6 +2085,9 @@ def run_gui(loop, source, axes, arm_filter, args):
         if not show_diag["value"]:
             return
         note = source.funnel.last_loss or source.note
+        if getattr(source, "infrared", None):
+            note = ("КАДР ИНФРАКРАСНЫЙ, не цветной — распознавание хуже. "
+                    "Цвет у RealSense: ./run_realsense.command") or note
         errors = state["errors"] + worker.errors
         tail = ""
         if errors:
@@ -2042,7 +2098,8 @@ def run_gui(loop, source, axes, arm_filter, args):
             text=f"распознавание {worker.fps:.0f} к/с "
                  f"(кадр {worker.poll_ms:.0f} мс = камера "
                  f"{source.camera_ms:.0f} + поза {source.detect_ms:.0f})   "
-                 f"шина {loop.sweep_ms:.0f} мс   "
+                 f"шина {loop.sweep_ms:.0f} мс"
+                 f"{f', сбоев {loop.error_rate*100:.0f}%' if loop.dropped else ''}   "
                  f"{source.funnel.report()}   |   {note}{tail}",
             foreground="#e05252" if errors else "#888")
 
@@ -2238,6 +2295,14 @@ def main() -> int:
     p.add_argument("--port")
     p.add_argument("--baud", type=int, default=19200)
     p.add_argument("--parity", default="E", choices=["N", "E", "O"])
+    p.add_argument("--timeout", type=float, default=0.1, metavar="СЕК",
+                   help="сколько ждать ответа привода. На 19200 обмен идёт "
+                        "14 мс, так что 0.1 — семикратный запас. Больше "
+                        "стоит ставить, только если приводы правда медленные: "
+                        "на помехах длинный таймаут превращает сбой в "
+                        "секундное зависание оси")
+    p.add_argument("--retries", type=int, default=3, metavar="N",
+                   help="сколько раз повторять сбойный обмен")
     p.add_argument("--host")
     p.add_argument("--tcp-port", type=int, default=502)
 
