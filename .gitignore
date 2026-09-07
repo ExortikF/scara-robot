@@ -22,3 +22,6 @@ models/vosk-ru/
 
 # Мусор Finder
 .DS_Store
+
+# Исходное положение — снимается на железе, машинозависимо
+tools/arm_home.json

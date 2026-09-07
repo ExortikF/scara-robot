@@ -2335,6 +2335,23 @@ def main() -> int:
     if args.smoke:
         args.simulate = True
         args.no_voice = True
+        args.no_record = True       # журнал самопроверки в logs не нужен
+
+        # Самопроверка ЖМЁТ КНОПКИ, а кнопки «середина здесь» и
+        # «запомнить исходное» пишут файлы настройки. На симуляторе они
+        # содержат нули, и проверка затирала ими настоящую калибровку,
+        # снятую на железе. Поэтому в этом режиме файлы уводятся во
+        # временную папку и работе не мешают вовсе.
+        global CALIBRATION_FILE, HOME_FILE
+        import tempfile
+        песочница = Path(tempfile.mkdtemp(prefix="самопроверка-"))
+        CALIBRATION_FILE = песочница / "arm_calibration.json"
+        HOME_FILE = песочница / "arm_home.json"
+        log.info("самопроверка: настройки пишутся в %s", песочница)
+
+        import atexit
+        import shutil
+        atexit.register(shutil.rmtree, песочница, ignore_errors=True)
     if not (args.simulate or args.confirm or args.diag
             or args.test_move is not None):
         print(__doc__)
