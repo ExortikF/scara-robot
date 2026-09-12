@@ -1318,32 +1318,15 @@ def preflight_line(transport: SerialConfig) -> None:
 
 
 CALIBRATION_FILE = Path(__file__).with_name("arm_calibration.json")
-HOME_FILE = Path(__file__).with_name("arm_home.json")
 
-
-def load_home() -> dict:
-    """Исходное положение осей в ИМПУЛЬСАХ энкодера.
-
-    Именно в импульсах, а не в градусах от программной середины: середину
-    человек задаёт заново по многу раз за сеанс, и привязанное к ней
-    исходное уезжало бы вместе с ней. Импульсы привязаны к валу.
-    """
-    if not HOME_FILE.is_file():
-        return {}
-    try:
-        return {k: int(v) for k, v in
-                json.loads(HOME_FILE.read_text(encoding="utf-8")).items()}
-    except (OSError, ValueError) as exc:
-        log.warning("не читается %s: %s", HOME_FILE.name, exc)
-        return {}
-
-
-def save_home(home: dict) -> None:
-    try:
-        HOME_FILE.write_text(json.dumps(home, ensure_ascii=False, indent=2),
-                             encoding="utf-8")
-    except OSError as exc:
-        log.warning("не сохранить исходное: %s", exc)
+# Исходное положение НА ДИСК НЕ ПИШЕТСЯ и живёт только внутри сеанса.
+#
+# Хранится оно в импульсах энкодера — иначе уезжало бы вместе с
+# программной серединой. Но импульсы верны, только пока механику не
+# трогали: после переборки, смены нуля робота или перестановки на
+# тележку старые импульсы указывают в никуда. Файл при этом выглядит
+# годным, кнопка — готовой, и рука уезжает не туда, куда человек её
+# ставил. Задать заново — одно нажатие, и оно всегда верное.
 
 
 def load_calibration() -> dict:
@@ -1559,7 +1542,13 @@ def run_gui(loop, source, axes, arm_filter, args):
     from PIL import Image, ImageTk
 
     keep = {}
-    home = load_home()          # нужен до создания кнопки
+
+    # Исходное положение НЕ подтягивается из прошлого запуска намеренно.
+    # Оно хранится в импульсах энкодера и верно только пока механику не
+    # трогали; после переборки или смены нуля старые импульсы указывают
+    # в никуда, а кнопка выглядит готовой и уводит руку не туда. Дешевле
+    # задавать его заново каждый сеанс — это одно нажатие.
+    home = {}
     paused = {"value": True}          # стартуем на паузе: сначала проверьте картинку
     zero = {"q1": 0.0, "q2": 0.0}     # поза, принятая за ноль
 
@@ -1626,7 +1615,7 @@ def run_gui(loop, source, axes, arm_filter, args):
                                "приводы не поедут", foreground="#ffb648")
             return
         if not zeroed["value"]:
-            status.config(text="сначала выставьте середину: без неё цель "
+            status.config(text="сначала «РУКА ПРЯМАЯ»: без неё цель "
                                "считается от произвольного угла",
                           foreground="#ffb648")
             return
@@ -1685,7 +1674,6 @@ def run_gui(loop, source, axes, arm_filter, args):
         for axis in axes:
             follower = loop.followers[axis.name]
             home[axis.name] = follower.telemetry.raw_counts
-        save_home(home)
         home_button.config(text="В ИСХОДНОЕ")
         status.config(
             text="исходное положение запомнено. Кнопка теперь возвращает "
@@ -1774,67 +1762,113 @@ def run_gui(loop, source, axes, arm_filter, args):
                                "если сдвигали оси, и снимайте паузу.",
                           foreground="")
 
+    def set_robot_zero():
+        """Принять нынешнее положение осей за прямое положение робота.
+
+        Отдельно от позы руки — и в этом весь смысл.
+
+        Раньше одна кнопка запоминала И руку, И оси разом. Чтобы это дало
+        верную настройку, в момент нажатия робот обязан стоять ровно
+        прямым, а рука — быть ровно прямой. Второе человек контролирует
+        глазами, первое — нет: манипулятор почти прямой выглядит как
+        прямой. Разница уходила в настройку и потом всплывала тем, что
+        при прямом локте ось стоит с уклоном.
+
+        Теперь ноль робота ставится руками: расслабить, выставить рычаги
+        по-настоящему прямо, нажать. Поза руки задаётся отдельно и этот
+        ноль не трогает.
+
+        Значение хранится в импульсах энкодера и переживает перезапуск:
+        энкодеры абсолютные, и механический ноль от сеанса к сеансу не
+        меняется — пока не разберут саму механику.
+        """
+        if not relaxed["value"]:
+            status.config(
+                text="сначала «РАССЛАБИТЬ» — ноль робота выставляют руками, "
+                     "поставив рычаги прямо", foreground="#ffb648")
+            return
+
+        def done(_result):
+            robot_zeroed["value"] = True
+            save_calibration({name: follower.zero_offset_counts
+                              for name, follower in loop.followers.items()})
+            подпись = ", ".join(
+                f"{a.name.split()[0]} {loop.followers[a.name].zero_offset_counts}"
+                for a in axes)
+            status.config(
+                text=f"ноль робота выставлен ({подпись}) и сохранён. "
+                     f"Теперь «ЗАЖАТЬ», выпрямите свою руку и нажмите "
+                     f"«РУКА ПРЯМАЯ».", foreground="")
+
+        # Запоминаем только после того, как оси реально опрошены: при
+        # сбое связи ноль считался бы выставленным, а смещение осталось
+        # бы прежним — и цель поехала бы от чужого угла.
+        status.config(text="опрашиваю оси...", foreground="#ffb648")
+        on_bus("ноль робота", loop.set_zero_here, done)
+
     def set_middle():
-        """Принять текущее положение и руки, и осей за середину."""
+        """Принять нынешнюю позу руки за прямую. Оси при этом не трогаем.
+
+        Ноль робота задаётся отдельной кнопкой и живёт своей жизнью:
+        механика прямого положения не меняется от того, где человек
+        держит руку.
+        """
+        if not robot_zeroed["value"]:
+            status.config(
+                text="сначала задайте ноль робота: «РАССЛАБИТЬ», выставить "
+                     "рычаги прямо, «НОЛЬ РОБОТА»", foreground="#ffb648")
+            return
         current = arm_filter.last
         if current is None:
-            status.config(text="руку не вижу — нечего принимать за середину",
+            status.config(text="руку не вижу — нечего принимать за прямую",
                           foreground="#ffb648")
             return
-        def done(_result):
-            zero["q1"], zero["q2"] = current
-            zeroed["value"] = True
-            saved = {name: follower.zero_offset_counts
-                     for name, follower in loop.followers.items()}
-            save_calibration(saved)
-            status.config(text=f"середина выставлена: плечо {zero['q1']:.0f}°, "
-                               f"локоть {zero['q2']:.0f}°. Сохранено, "
-                               f"можно снимать паузу.", foreground="")
 
-        # Середину запоминаем только после того, как оси реально
-        # опрошены: иначе при сбое связи ноль считался бы выставленным, а
-        # смещение осталось бы прежним — и цель поехала бы от чужого угла.
-        status.config(text="опрашиваю оси...", foreground="#ffb648")
-        on_bus("середина", loop.set_zero_here, done)
+        zero["q1"], zero["q2"] = current
+        zeroed["value"] = True
+        status.config(text=f"поза руки принята за прямую: плечо "
+                           f"{zero['q1']:.0f}°, локоть {zero['q2']:.0f}°. "
+                           f"Можно снимать паузу.", foreground="")
 
     def use_saved():
-        """Взять середину осей из файла, а позу руки — текущую."""
-        current = arm_filter.last
-        if current is None:
-            status.config(text="руку не вижу — покажите её в кадре",
-                          foreground="#ffb648")
-            return
+        """Взять ноль робота из файла. Позу руки задают отдельно.
+
+        Механический ноль не меняется от сеанса к сеансу, поэтому его
+        нормально брать сохранённым — и переставлять руками только после
+        того, как трогали саму механику.
+        """
         saved = load_calibration()
         missing = [n for n in loop.followers if n not in saved]
         if missing:
-            status.config(text=f"нет сохранённой середины для: "
+            status.config(text=f"нет сохранённого нуля для: "
                                f"{', '.join(missing)}", foreground="#ffb648")
             return
         for name, follower in loop.followers.items():
             follower.zero_offset_counts = int(saved[name])
-        zero["q1"], zero["q2"] = current
-        zeroed["value"] = True
-        status.config(text="середина осей взята из файла, поза руки — "
-                           "текущая. Можно снимать паузу.", foreground="")
+        robot_zeroed["value"] = True
+        status.config(text="ноль робота взят из файла. Выпрямите свою руку "
+                           "и нажмите «РУКА ПРЯМАЯ».", foreground="")
 
     pause_button = ttk.Button(buttons, text="ПРОДОЛЖИТЬ", command=toggle_pause)
     pause_button.grid(row=0, column=0, padx=6)
     ttk.Button(buttons, text="СТОП", command=emergency_stop).grid(
         row=0, column=1, padx=6)
-    ttk.Button(buttons, text="СЕРЕДИНА ЗДЕСЬ", command=set_middle).grid(
+    ttk.Button(buttons, text="НОЛЬ РОБОТА", command=set_robot_zero).grid(
         row=0, column=2, padx=6)
-    ttk.Button(buttons, text="взять сохранённую", command=use_saved).grid(
+    ttk.Button(buttons, text="РУКА ПРЯМАЯ", command=set_middle).grid(
         row=0, column=3, padx=6)
+    ttk.Button(buttons, text="ноль из файла", command=use_saved).grid(
+        row=0, column=4, padx=6)
     relax_button = ttk.Button(buttons, text="РАССЛАБИТЬ", command=toggle_relax)
-    relax_button.grid(row=0, column=4, padx=6)
+    relax_button.grid(row=0, column=5, padx=6)
     ttk.Button(buttons, text="СБРОС ОШИБКИ", command=clear_fault).grid(
-        row=0, column=5, padx=6)
+        row=0, column=6, padx=6)
     home_button = ttk.Button(buttons, command=home_pressed,
                              text="В ИСХОДНОЕ" if home else "ЗАПОМНИТЬ ИСХОДНОЕ")
-    home_button.grid(row=0, column=6, padx=6)
+    home_button.grid(row=0, column=7, padx=6)
     diag_button = ttk.Button(buttons, text="диагностика",
                              command=lambda: toggle_diag())
-    diag_button.grid(row=0, column=7, padx=6)
+    diag_button.grid(row=0, column=8, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1,
              "last_target_ms": 0.0}
@@ -1868,8 +1902,23 @@ def run_gui(loop, source, axes, arm_filter, args):
                                  extrasaction="ignore")
         journal.writeheader()
         log.info("журнал: %s", record_path)
-    zeroed = {"value": False}
+    zeroed = {"value": False}          # поза руки принята за прямую
+    robot_zeroed = {"value": False}    # ноль робота известен
     relaxed = {"value": False}
+
+    # Ноль робота подтягивается из файла сразу. В отличие от исходного
+    # положения он МЕХАНИЧЕСКИЙ: прямое положение рычагов не меняется от
+    # сеанса к сеансу, а энкодеры абсолютные и переживают выключение.
+    # Заставлять человека выставлять его каждый запуск было бы работой
+    # на ровном месте.
+    сохранённый_ноль = load_calibration()
+    if сохранённый_ноль and not set(loop.followers) - set(сохранённый_ноль):
+        for name, follower in loop.followers.items():
+            follower.zero_offset_counts = int(сохранённый_ноль[name])
+        robot_zeroed["value"] = True
+        log.info("ноль робота взят из %s", CALIBRATION_FILE.name)
+    else:
+        log.info("нуля робота нет — задайте его кнопкой «НОЛЬ РОБОТА»")
     show_diag = {"value": False}
     pending: list = []
 
@@ -2483,11 +2532,10 @@ def main() -> int:
         # содержат нули, и проверка затирала ими настоящую калибровку,
         # снятую на железе. Поэтому в этом режиме файлы уводятся во
         # временную папку и работе не мешают вовсе.
-        global CALIBRATION_FILE, HOME_FILE
+        global CALIBRATION_FILE
         import tempfile
         песочница = Path(tempfile.mkdtemp(prefix="самопроверка-"))
         CALIBRATION_FILE = песочница / "arm_calibration.json"
-        HOME_FILE = песочница / "arm_home.json"
         log.info("самопроверка: настройки пишутся в %s", песочница)
 
         import atexit
