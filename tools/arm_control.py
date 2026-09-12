@@ -1557,12 +1557,9 @@ def run_gui(loop, source, axes, arm_filter, args):
     root.minsize(1180, 760)
 
     ttk.Label(root, font=("SF Pro Text", 13, "bold"),
-              text="камера сверху: плечо -> J1, локоть -> J2").pack(pady=(12, 2))
+              text="плечо -> J1    локоть -> J2").pack(pady=(12, 2))
     ttk.Label(root, font=("SF Pro Text", 11), foreground="#888",
-              text="сначала убедитесь, что скелет лёг на руку правильно, "
-                   "потом «ноль здесь» и снимайте паузу").pack(pady=(0, 2))
-    ttk.Label(root, font=("SF Pro Text", 11), foreground="#888",
-              text="голосом: «старт» · «стоп» · «линия» · «положение»").pack(pady=(0, 8))
+              text="голосом: старт · стоп · линия · положение").pack(pady=(0, 8))
 
     middle = ttk.Frame(root)
     middle.pack(fill="both", expand=True, padx=14)
@@ -1615,8 +1612,7 @@ def run_gui(loop, source, axes, arm_filter, args):
                                "приводы не поедут", foreground="#ffb648")
             return
         if not zeroed["value"]:
-            status.config(text="сначала «РУКА ПРЯМАЯ»: без неё цель "
-                               "считается от произвольного угла",
+            status.config(text="нет нуля руки — нажмите «РУКА ПРЯМАЯ»",
                           foreground="#ffb648")
             return
         paused["value"] = not paused["value"]
@@ -1645,7 +1641,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         on_bus("стоп", loop.freeze)
         pause_button.config(text="ПРОДОЛЖИТЬ")
         relax_button.config(text="РАССЛАБИТЬ")
-        status.config(text="ОСТАНОВЛЕНО. Оси стоят под током. "
+        status.config(text="СТОП. Оси под током. "
                            "«ПРОДОЛЖИТЬ» — снова поехать.",
                       foreground="#e05252")
 
@@ -1676,8 +1672,7 @@ def run_gui(loop, source, axes, arm_filter, args):
             home[axis.name] = follower.telemetry.raw_counts
         home_button.config(text="В ИСХОДНОЕ")
         status.config(
-            text="исходное положение запомнено. Кнопка теперь возвращает "
-                 "в него; чтобы задать заново — «РАССЛАБИТЬ» и снова сюда.",
+            text="исходное запомнено",
             foreground="")
 
     def go_home() -> None:
@@ -1736,8 +1731,7 @@ def run_gui(loop, source, axes, arm_filter, args):
                 return
             paused["value"] = True
             pause_button.config(text="ПРОДОЛЖИТЬ")
-            status.config(text="авария снята, оси стоят на месте. Проверьте "
-                               "причину, потом снимайте паузу.", foreground="")
+            status.config(text="авария снята, оси на месте", foreground="")
 
         status.config(text="снимаю аварию...", foreground="#ffb648")
         on_bus("снятие аварии", loop.clear_fault, done)
@@ -1754,13 +1748,10 @@ def run_gui(loop, source, axes, arm_filter, args):
             # поедет к цели, которую источник наставил, пока руку двигали.
             paused["value"] = True
             pause_button.config(text="ПРОДОЛЖИТЬ")
-            status.config(text="МОМЕНТ СНЯТ — двигайте руку робота руками. "
-                               "Положение в таблице обновляется.",
+            status.config(text="момент снят — двигайте руку руками",
                           foreground="#ffb648")
         else:
-            status.config(text="момент возвращён. Выставьте середину заново, "
-                               "если сдвигали оси, и снимайте паузу.",
-                          foreground="")
+            status.config(text="момент возвращён", foreground="")
 
     def set_robot_zero():
         """Принять нынешнее положение осей за прямое положение робота.
@@ -1784,8 +1775,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         """
         if not relaxed["value"]:
             status.config(
-                text="сначала «РАССЛАБИТЬ» — ноль робота выставляют руками, "
-                     "поставив рычаги прямо", foreground="#ffb648")
+                text="сначала «РАССЛАБИТЬ»", foreground="#ffb648")
             return
 
         def done(_result):
@@ -1815,20 +1805,18 @@ def run_gui(loop, source, axes, arm_filter, args):
         """
         if not robot_zeroed["value"]:
             status.config(
-                text="сначала задайте ноль робота: «РАССЛАБИТЬ», выставить "
-                     "рычаги прямо, «НОЛЬ РОБОТА»", foreground="#ffb648")
+                text="сначала «НОЛЬ РОБОТА»", foreground="#ffb648")
             return
         current = arm_filter.last
         if current is None:
-            status.config(text="руку не вижу — нечего принимать за прямую",
+            status.config(text="руку не вижу",
                           foreground="#ffb648")
             return
 
         zero["q1"], zero["q2"] = current
         zeroed["value"] = True
-        status.config(text=f"поза руки принята за прямую: плечо "
-                           f"{zero['q1']:.0f}°, локоть {zero['q2']:.0f}°. "
-                           f"Можно снимать паузу.", foreground="")
+        status.config(text=f"рука прямая: плечо {zero['q1']:.0f}°, "
+                           f"локоть {zero['q2']:.0f}°", foreground="")
 
     def use_saved():
         """Взять ноль робота из файла. Позу руки задают отдельно.
@@ -1846,8 +1834,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         for name, follower in loop.followers.items():
             follower.zero_offset_counts = int(saved[name])
         robot_zeroed["value"] = True
-        status.config(text="ноль робота взят из файла. Выпрямите свою руку "
-                           "и нажмите «РУКА ПРЯМАЯ».", foreground="")
+        status.config(text="ноль робота из файла", foreground="")
 
     pause_button = ttk.Button(buttons, text="ПРОДОЛЖИТЬ", command=toggle_pause)
     pause_button.grid(row=0, column=0, padx=6)
@@ -2127,8 +2114,8 @@ def run_gui(loop, source, axes, arm_filter, args):
                 reason = f"точек нет уже {idle:.0f} с"
             status.config(text=f"РОБОТ СТОИТ: {reason}", foreground="#e05252")
         elif relaxed["value"]:
-            status.config(text="МОМЕНТ СНЯТ — оси свободны, положение "
-                               "обновляется", foreground="#ffb648")
+            status.config(text="момент снят — оси свободны",
+                          foreground="#ffb648")
         elif paused["value"]:
             status.config(text="ПАУЗА — приводы не двигаются", foreground="#ffb648")
         else:
@@ -2144,12 +2131,12 @@ def run_gui(loop, source, axes, arm_filter, args):
                 text=f"МИКРОФОН НЕДОСТУПЕН — {voice.error or ''}",
                 foreground="#e05252")
         elif voice.muted:
-            voice_label.config(text="МИКРОФОН ЗАГЛУШЁН — команды не слышны",
+            voice_label.config(text="микрофон заглушён",
                                foreground="#ffb648")
         elif voice.status == "загружаю модель":
             # Большая модель разворачивается двадцать секунд. Без этой
             # строки окно выглядит так, будто голос просто не работает.
-            voice_label.config(text="голос: загружаю модель, это до полуминуты",
+            voice_label.config(text="голос: загружаю модель",
                                foreground="#888")
         else:
             since = time.monotonic() - voice.last_heard_at
@@ -2208,8 +2195,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         mic_button.config(text="ВКЛЮЧИТЬ МИКРОФОН" if voice.muted
                           else "ЗАГЛУШИТЬ МИКРОФОН")
         status.config(
-            text="микрофон заглушён — голосовые команды не действуют"
-                 if voice.muted else "микрофон снова слушает",
+            text="микрофон заглушён" if voice.muted else "микрофон слушает",
             foreground="#ffb648" if voice.muted else "")
 
     def on_voice(command: str) -> None:
