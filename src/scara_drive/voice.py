@@ -70,7 +70,37 @@ DEFAULT_CONFIDENCE = 0.45
 #: паузы в речи ради «стоп» неправильно: он нужен немедленно.
 PARTIAL_ALLOWED = ("стоп",)
 
-MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "vosk-ru"
+МОДЕЛИ = Path(__file__).resolve().parents[2] / "models"
+
+#: Большая модель, если она скачана, и маленькая иначе. Порядок важен:
+#: первая найденная и берётся.
+ПОРЯДОК_МОДЕЛЕЙ = ("vosk-model-ru-0.42", "vosk-ru")
+
+
+def выбрать_модель() -> Path:
+    """Какая модель распознавания будет использована.
+
+    Большая точнее на шумном фоне, и раз человек её скачал — значит она
+    ему нужна, спрашивать об этом каждый запуск незачем. Если её нет,
+    работает маленькая, и программа от этого не ломается: разница между
+    ними на замерах невелика.
+
+    Платится за большую только временем запуска: она разворачивается
+    около двадцати секунд. Поэтому грузится она в рабочем потоке, а окно
+    в это время уже открыто и кнопки нажимаются.
+
+    >>> выбрать_модель().parent.name
+    'models'
+    """
+    for имя in ПОРЯДОК_МОДЕЛЕЙ:
+        папка = МОДЕЛИ / имя
+        if папка.is_dir():
+            return папка
+    return МОДЕЛИ / ПОРЯДОК_МОДЕЛЕЙ[-1]      # чтобы было что показать в ошибке
+
+
+#: Оставлено ради старого кода, который берёт путь отсюда.
+MODEL_DIR = выбрать_модель()
 
 
 class VoiceCommands:
@@ -161,7 +191,9 @@ class VoiceCommands:
                               else silence_level)
         self.skipped = 0            # сколько кусков пропущено как тишина
 
-        folder = model_dir or MODEL_DIR
+        # Спрашиваем каждый раз, а не берём MODEL_DIR: модель могли
+        # скачать уже после запуска, да и при проверках папка подменяется.
+        folder = model_dir or выбрать_модель()
         if not folder.is_dir():
             raise SystemExit(
                 f"нет модели распознавания: {folder}\n\n"
@@ -173,7 +205,14 @@ class VoiceCommands:
                 "    mv models/vosk-model-small-ru-0.22 models/vosk-ru\n")
 
         vosk.SetLogLevel(-1)          # иначе засыпает терминал отладкой
-        self._model = vosk.Model(str(folder))
+
+        # Модель грузится в РАБОЧЕМ потоке, а не здесь. Большая модель
+        # разворачивается двадцать секунд, а этот конструктор вызывают из
+        # потока окна: загрузка тут означала бы замерший интерфейс на всё
+        # это время — и первое, что человек попробовал бы нажать, была бы
+        # кнопка «стоп», которая тоже не нажалась бы.
+        self._folder = folder
+        self._model = None
 
         # Ограничиваем словарь: модель тогда не пытается расслышать в шуме
         # посторонние слова и почти не выдаёт ложных срабатываний.
@@ -197,6 +236,7 @@ class VoiceCommands:
         # услышал», а под sudo микрофон отказывает молча — macOS выдаёт
         # доступ приложению, и от имени root запрос уходит мимо него.
         self.status = "запуск"
+        self.muted = False          # микрофон заглушён человеком
         self.error: str | None = None
         self.last_heard: str | None = None
         self.last_heard_at: float = 0.0
@@ -379,6 +419,20 @@ class VoiceCommands:
                 pass
 
     def _worker(self) -> None:
+        if self._model is None:
+            self.status = "загружаю модель"
+            начало = __import__("time").monotonic()
+            try:
+                self._model = self._vosk.Model(str(self._folder))
+            except Exception as сбой:
+                self.status = "нет модели"
+                self.error = str(сбой)
+                log.error("модель распознавания не загрузилась: %s", сбой)
+                return
+            ушло = __import__("time").monotonic() - начало
+            log.info("модель речи %s загружена за %.1f с",
+                     self._folder.name, ушло)
+
         recognizer = self._vosk.KaldiRecognizer(
             self._model, self.SAMPLE_RATE, self._grammar)
         # Просим разбор по словам с оценками — без него уверенность
@@ -392,12 +446,30 @@ class VoiceCommands:
                 self.status = "слушаю"
                 log.info("слушаю голос: старт, стоп, линия, положение")
                 hangover = 0
+                заглушены = False
                 фон: list[float] = []
                 while not self._stop.is_set():
                     try:
                         chunk = self._queue.get(timeout=0.2)
                     except queue.Empty:
                         continue
+
+                    if self.muted:
+                        # Заглушено — кусок даже не распознаём. Просто не
+                        # слушать команды мало: распознавание всё равно
+                        # молотило бы процессор впустую, а ради этого
+                        # заглушку и включают, когда рядом говорят.
+                        self.status = "заглушен"
+                        заглушены = True
+                        continue
+                    if заглушены:
+                        # После паузы у распознавателя внутри остаётся
+                        # обрывок фразы, сказанной до заглушки. Без сброса
+                        # он склеится с первым же новым словом.
+                        recognizer.Reset()
+                        заглушены = False
+                        hangover = 0
+                        self.status = "слушаю"
 
                     if len(фон) < self.CALIBRATE_CHUNKS:
                         self._is_silence(chunk)     # заполняет self.level

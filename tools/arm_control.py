@@ -1866,9 +1866,12 @@ def run_gui(loop, source, axes, arm_filter, args):
     home_button = ttk.Button(buttons, command=home_pressed,
                              text="В ИСХОДНОЕ" if home else "ЗАПОМНИТЬ ИСХОДНОЕ")
     home_button.grid(row=0, column=7, padx=6)
+    mic_button = ttk.Button(buttons, text="ЗАГЛУШИТЬ МИКРОФОН",
+                            command=lambda: toggle_mic())
+    mic_button.grid(row=0, column=8, padx=6)
     diag_button = ttk.Button(buttons, text="диагностика",
                              command=lambda: toggle_diag())
-    diag_button.grid(row=0, column=8, padx=6)
+    diag_button.grid(row=0, column=9, padx=6)
 
     state = {"errors": 0, "last_error": "", "shown_frame": -1,
              "last_target_ms": 0.0}
@@ -2140,6 +2143,14 @@ def run_gui(loop, source, axes, arm_filter, args):
             voice_label.config(
                 text=f"МИКРОФОН НЕДОСТУПЕН — {voice.error or ''}",
                 foreground="#e05252")
+        elif voice.muted:
+            voice_label.config(text="МИКРОФОН ЗАГЛУШЁН — команды не слышны",
+                               foreground="#ffb648")
+        elif voice.status == "загружаю модель":
+            # Большая модель разворачивается двадцать секунд. Без этой
+            # строки окно выглядит так, будто голос просто не работает.
+            voice_label.config(text="голос: загружаю модель, это до полуминуты",
+                               foreground="#888")
         else:
             since = time.monotonic() - voice.last_heard_at
             if voice.last_heard and since < 3.0:
@@ -2181,6 +2192,25 @@ def run_gui(loop, source, axes, arm_filter, args):
                  f"{f', сбоев {loop.error_rate*100:.0f}%' if loop.dropped else ''}   "
                  f"{source.funnel.report()}   |   {note}{tail}",
             foreground="#e05252" if errors else "#888")
+
+    def toggle_mic() -> None:
+        """Заглушить микрофон или вернуть его.
+
+        Заглушённый микрофон именно не распознаёт, а не «слушает и не
+        реагирует»: когда рядом разговаривают, впустую молотить
+        распознавание незачем — ради этого заглушку и включают.
+        """
+        if voice is None:
+            status.config(text="голосовые команды не запущены",
+                          foreground="#ffb648")
+            return
+        voice.muted = not voice.muted
+        mic_button.config(text="ВКЛЮЧИТЬ МИКРОФОН" if voice.muted
+                          else "ЗАГЛУШИТЬ МИКРОФОН")
+        status.config(
+            text="микрофон заглушён — голосовые команды не действуют"
+                 if voice.muted else "микрофон снова слушает",
+            foreground="#ffb648" if voice.muted else "")
 
     def on_voice(command: str) -> None:
         """Голосовая команда. Приходит из потока распознавания.
