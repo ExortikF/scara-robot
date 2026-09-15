@@ -38,11 +38,19 @@ def main() -> int:
 
     print("=== проверка RealSense ===\n")
 
-    print(f"права root: {'да' if os.geteuid() == 0 else 'НЕТ — нужен sudo'}")
-    if os.geteuid() != 0:
-        print("\nЗапускайте так:")
-        print("    sudo .venv-rs/bin/python tools/rs_check.py")
-        return 1
+    from scara_drive.platform_bits import (КАМЕРЕ_НУЖЕН_ROOT, имя_системы,
+                                            запущен_от_root)
+
+    print(f"система: {имя_системы()}")
+    if КАМЕРЕ_НУЖЕН_ROOT:
+        есть = запущен_от_root()
+        print(f"права root: {'да' if есть else 'НЕТ — нужен sudo'}")
+        if not есть:
+            print("\nЗапускайте так:")
+            print("    sudo .venv-rs/bin/python tools/rs_check.py")
+            return 1
+    else:
+        print("права root: не нужны в этой системе")
 
     try:
         import pyrealsense2 as rs
@@ -52,10 +60,11 @@ def main() -> int:
         return 1
     print("pyrealsense2: есть")
 
-    import subprocess
-    subprocess.run(["killall", "VDCAssistant"], capture_output=True, check=False)
-    time.sleep(0.6)
-    print("VDCAssistant: согнан")
+    from scara_drive.platform_bits import MACOS, освободить_камеру
+
+    освободить_камеру()
+    if MACOS:
+        print("VDCAssistant: согнан")
 
     ctx = rs.context()
     devices = list(ctx.query_devices())

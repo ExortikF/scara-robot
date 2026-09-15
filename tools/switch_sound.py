@@ -66,8 +66,9 @@ def play_sound(name: str) -> None:
         return
     # Не ждём окончания: концевик могут щёлкать быстрее, чем играет звук,
     # и блокировка здесь превратилась бы в отставание от железа.
-    subprocess.Popen(["afplay", str(path)],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    from scara_drive.platform_bits import проиграть_звук
+
+    проиграть_звук(path)
 
 
 def speak(text: str, voice: str | None) -> None:

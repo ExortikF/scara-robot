@@ -642,7 +642,13 @@ class RealSenseFrames:
             ) from exc
         self._rs = rs
 
-        if os.geteuid() != 0:
+        # Права root нужны только macOS: там система не отдаёт камеру
+        # библиотеке без них. Windows и Linux отдают как есть, и
+        # требовать там администратора не за что.
+        from scara_drive.platform_bits import (КАМЕРЕ_НУЖЕН_ROOT,
+                                                запущен_от_root)
+
+        if КАМЕРЕ_НУЖЕН_ROOT and not запущен_от_root():
             raise SystemExit(
                 "Для RealSense нужны права root: без них macOS не отдаёт\n"
                 "камеру библиотеке.\n\nЗапускайте так:\n"
@@ -769,11 +775,9 @@ class RealSenseFrames:
         Поэтому гнать его надо не один раз при старте, а перед каждой
         попыткой достучаться до камеры.
         """
-        import subprocess
+        from scara_drive.platform_bits import освободить_камеру
 
-        subprocess.run(["killall", "VDCAssistant"],
-                       capture_output=True, check=False)
-        time.sleep(settle_s)         # дать интерфейсу освободиться
+        освободить_камеру(settle_s)
 
     def _reset_device(self) -> bool:
         """Сбросить камеру и заново её найти.

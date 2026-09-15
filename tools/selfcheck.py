@@ -118,6 +118,19 @@ def check_control_loop() -> bool:
     return idle_ok and reach_ok and quiet_ok
 
 
+def check_portable() -> bool:
+    """Ничего, что работает только на одной системе, вне platform_bits."""
+    print("\nпереносимость:")
+    done = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "check_portable.py")],
+        capture_output=True, text=True, timeout=60)
+    if done.returncode != 0:
+        строки = done.stdout.strip().splitlines()
+        return line(False, "различия систем собраны в одном месте",
+                    строки[0] if строки else "")
+    return line(True, "различия систем собраны в одном месте")
+
+
 def check_gui() -> bool:
     """Окно управления должно собираться целиком.
 
@@ -141,7 +154,7 @@ def check_gui() -> bool:
 def main() -> int:
     print(f"проверка проекта в {ROOT}\n")
     results = [check_doctests(), check_entry_points(), check_control_loop(),
-               check_gui()]
+               check_portable(), check_gui()]
     print()
     if all(results):
         print(f"{GREEN}всё в порядке{OFF}")

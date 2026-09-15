@@ -40,7 +40,18 @@ class Port:
 
     @property
     def is_callout(self) -> bool:
-        """macOS: /dev/cu.* — то, что нужно открывать."""
+        """Годится ли порт для открытия.
+
+        Деление на dial-in и call-out есть только у macOS и Linux. На
+        Windows порт один — ``COM3``, — и имя под условие не подпадает,
+        то есть ответ там всегда «годится». Это верно, а не случайно:
+        отбрасывать на Windows нечего.
+
+        >>> Port("COM3", "USB Serial", 0x0403, 0x6001).is_callout
+        True
+        >>> Port("/dev/tty.usbserial-A1", "", None, None).is_callout
+        False
+        """
         return not self.device.startswith("/dev/tty.")
 
     def __str__(self) -> str:
@@ -83,6 +94,20 @@ class PortBusyError(OSError):
     """Порт держит другая программа."""
 
 
+def узел_на_месте(port: str) -> bool:
+    """Существует ли порт как объект системы.
+
+    Как именно это проверяется, зависит от системы — подробности в
+    :func:`scara_drive.platform_bits.порт_существует`.
+
+    >>> узел_на_месте("/dev/такого-точно-нет")
+    False
+    """
+    from scara_drive.platform_bits import порт_существует
+
+    return порт_существует(port)
+
+
 def open_serial(port: str, **kwargs):
     """Открыть порт, переводя тёмные ошибки в понятные.
 
@@ -92,10 +117,9 @@ def open_serial(port: str, **kwargs):
     кабеле, невозможно, поэтому проверяем наличие узла и объясняем прямо.
     """
     import errno
-    import os
     import serial
 
-    if not os.path.exists(port):
+    if not узел_на_месте(port):
         raise PortGoneError(
             f"порт {port} исчез — переходник отключился от USB.\n"
             "Проверьте кабель и разъём, затем посмотрите, вернулся ли он:\n"
@@ -118,7 +142,7 @@ def open_serial(port: str, **kwargs):
                 "  * ещё один запущенный скрипт с этим портом;\n"
                 "  * C30 Servo GUI, если речь про шину приводов."
             ) from exc
-        if not os.path.exists(port):
+        if not узел_на_месте(port):
             raise PortGoneError(
                 f"порт {port} пропал во время открытия — переходник отвалился "
                 f"от USB прямо сейчас.\nПроверьте кабель и разъём."
