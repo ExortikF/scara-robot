@@ -76,8 +76,27 @@ def есть_tkinter() -> bool:
 
 def проверить_питон() -> bool:
     версия = sys.version_info[:2]
+    разрядность = 64 if sys.maxsize > 2 ** 32 else 32
     print(f"  питон {platform.python_version()} "
-          f"({platform.system()} {platform.machine()})")
+          f"({platform.system()} {platform.machine()}, {разрядность} бит)")
+
+    # 32 бита — самая частая беда на Windows, и по ошибке pip её не
+    # опознать: он пишет «no matching distribution found for numpy», как
+    # будто пропал интернет. На деле колёс под 32-битную Windows не
+    # выпускают уже несколько лет ни numpy, ни mediapipe, ни opencv.
+    # С сайта питона по умолчанию нередко качается именно 32-битный
+    # установщик, поэтому попасть сюда проще, чем кажется.
+    if разрядность == 32:
+        print("  ЭТО 32-БИТНЫЙ ПИТОН — нужных пакетов под него не бывает.")
+        print("  Ни numpy, ни mediapipe, ни opencv давно не выпускают "
+              "32-битных сборок,")
+        print("  и установка обрывается на «no matching distribution "
+              "found for numpy».")
+        print()
+        print("  Поставьте 64-битный: на python.org это файл с пометкой")
+        print("  «Windows installer (64-bit)» — обычный «Windows installer»")
+        print("  без пометки бывает 32-битным.")
+        return False
     if версия < МИН_ПИТОН:
         print(f"  СЛИШКОМ СТАРЫЙ. Нужен хотя бы "
               f"{МИН_ПИТОН[0]}.{МИН_ПИТОН[1]}.")
@@ -86,6 +105,11 @@ def проверить_питон() -> bool:
     if версия > МАКС_ПИТОН:
         print(f"  СЛИШКОМ НОВЫЙ. Проверено до "
               f"{МАКС_ПИТОН[0]}.{МАКС_ПИТОН[1]} включительно.")
+        print("  Под свежую версию питона пакеты выходят не сразу, и "
+              "установка обрывается")
+        print("  на «no matching distribution found» — это не про "
+              "интернет, а про то,")
+        print("  что колеса под неё ещё нет.")
         print("  Под свежие версии ещё не собраны готовые пакеты для "
               "камеры RealSense,")
         print(f"  и ставить их пришлось бы из исходников. Возьмите "
@@ -167,7 +191,6 @@ def проверить_работу() -> bool:
         "import sys; sys.path.insert(0, r'%s')\n"
         "import cv2, numpy, serial, pymodbus, mediapipe\n"
         "import tkinter, PIL.Image, PIL.ImageTk\n"
-        "import vosk, sounddevice\n"
         "from scara_drive.follow import MultiAxisFollower\n"
         "from scara_drive.armtrack import angles_from_points\n"
         "print('импорты: в порядке')\n"

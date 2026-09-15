@@ -19,7 +19,12 @@ numpy
 opencv-contrib-python
 pillow
 
-# Голосовые команды офлайн. vosk не тянется ничем — без этой строки
-# программа ставится целиком и молча остаётся без голоса.
-vosk
-sounddevice
+# Голосовые команды НЕ ставятся по умолчанию: это ещё 87 МБ модели и
+# библиотека распознавания, а без них программа работает целиком — просто
+# без голоса. Кому нужно:
+#
+#     .venv/bin/pip install vosk sounddevice
+#     .venv/bin/python tools/setup_models.py --голос
+#
+# vosk
+# sounddevice

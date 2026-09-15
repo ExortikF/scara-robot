@@ -41,11 +41,13 @@ from pathlib import Path
      "hand_landmarker/float16/1/hand_landmarker.task", 8),
 ]
 
-АРХИВЫ = [
-    ("vosk-ru",
-     "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
-     "vosk-model-small-ru-0.22", 45),
-]
+#: Модель речи по умолчанию НЕ качается: 87 МБ ради возможности, без
+#: которой программа работает целиком. Ключ --голос забирает её.
+АРХИВЫ: list = []
+
+ГОЛОС = ("vosk-ru",
+         "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
+         "vosk-model-small-ru-0.22", 45)
 
 БОЛЬШАЯ_РЕЧЬ = ("vosk-model-ru-0.42",
                 "https://alphacephei.com/vosk/models/vosk-model-ru-0.42.zip",
@@ -117,10 +119,12 @@ def распаковать(архив: Path, куда: Path, внутрення�
         shutil.move(str(источник), str(куда))
 
 
-def чего_нет(с_большой: bool = False) -> list[str]:
+def чего_нет(с_большой: bool = False, с_голосом: bool = False) -> list[str]:
     """Список того, что ещё не скачано."""
     нет = [имя for имя, _, _ in ФАЙЛЫ if not (ПАПКА / имя).is_file()]
     нет += [имя for имя, _, _, _ in АРХИВЫ if not (ПАПКА / имя).is_dir()]
+    if с_голосом and not (ПАПКА / ГОЛОС[0]).is_dir():
+        нет.append(ГОЛОС[0])
     if с_большой and not (ПАПКА / БОЛЬШАЯ_РЕЧЬ[0]).is_dir():
         нет.append(БОЛЬШАЯ_РЕЧЬ[0])
     return нет
@@ -130,6 +134,9 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--голос", action="store_true",
+                   help="ещё и модель распознавания речи (87 МБ). Без неё "
+                        "работает всё, кроме голосовых команд")
     p.add_argument("--большая-модель-речи", action="store_true",
                    dest="большая",
                    help="ещё и vosk-model-ru-0.42: 1.9 ГБ архивом и 3.5 ГБ "
@@ -142,7 +149,7 @@ def main() -> int:
     ПАПКА.mkdir(parents=True, exist_ok=True)
 
     if args.проверить:
-        нет = чего_нет(args.большая)
+        нет = чего_нет(args.большая, args.голос)
         if нет:
             print("не хватает: " + ", ".join(нет))
             return 1
@@ -153,6 +160,9 @@ def main() -> int:
                for имя, ссылка, вес in ФАЙЛЫ]
     задания += [(имя, ссылка, вес, "zip", внутри)
                 for имя, ссылка, внутри, вес in АРХИВЫ]
+    if args.голос:
+        имя, ссылка, внутри, вес = ГОЛОС
+        задания.append((имя, ссылка, вес, "zip", внутри))
     if args.большая:
         имя, ссылка, внутри, вес = БОЛЬШАЯ_РЕЧЬ
         задания.append((имя, ссылка, вес, "zip", внутри))
@@ -181,7 +191,7 @@ def main() -> int:
                   "уже скачанное второй раз не качается")
             return 1
 
-    нет = чего_нет(args.большая)
+    нет = чего_нет(args.большая, args.голос)
     if нет:
         print("\nвсё ещё не хватает: " + ", ".join(нет))
         return 1
