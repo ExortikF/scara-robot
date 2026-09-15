@@ -166,7 +166,8 @@ def проверить_работу() -> bool:
     проба = (
         "import sys; sys.path.insert(0, r'%s')\n"
         "import cv2, numpy, serial, pymodbus, mediapipe\n"
-        "import tkinter\n"
+        "import tkinter, PIL.Image, PIL.ImageTk\n"
+        "import vosk, sounddevice\n"
         "from scara_drive.follow import MultiAxisFollower\n"
         "from scara_drive.armtrack import angles_from_points\n"
         "print('импорты: в порядке')\n"
