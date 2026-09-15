@@ -103,6 +103,9 @@ def выбрать_модель() -> Path:
 MODEL_DIR = выбрать_модель()
 
 
+from .platform_bits import ПИТОН_ОКРУЖЕНИЯ, PIP_ОКРУЖЕНИЯ
+
+
 class VoiceCommands:
     """Слушает микрофон и вызывает обработчик на каждую узнанную команду.
 
@@ -179,8 +182,10 @@ class VoiceCommands:
             import vosk
         except ImportError as exc:
             raise SystemExit(
-                "для голосовых команд нужны vosk и sounddevice:\n"
-                f"    ./.venv-rs/bin/pip install vosk sounddevice\n"
+                "голосовые команды не входят в базовую установку.\n\n"
+                "Чтобы включить, две команды из папки проекта:\n"
+                f"    {PIP_ОКРУЖЕНИЯ} install vosk sounddevice\n"
+                f"    {ПИТОН_ОКРУЖЕНИЯ} tools/setup_models.py --голос\n\n"
                 f"(не найдено: {exc.name})") from exc
 
         self._sd = sounddevice

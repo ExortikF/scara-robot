@@ -33,6 +33,13 @@ LINUX = sys.platform.startswith("linux")
 КАМЕРЕ_НУЖЕН_ROOT = MACOS
 
 
+#: Как выглядят пути к питону и pip внутри окружения. Идут в подсказки:
+#: «поставьте через .venv/bin/pip» на Windows никуда не ведёт.
+ПИТОН_ОКРУЖЕНИЯ = (r".venv\Scripts\python.exe" if WINDOWS
+                   else ".venv/bin/python")
+PIP_ОКРУЖЕНИЯ = (r".venv\Scripts\pip.exe" if WINDOWS else ".venv/bin/pip")
+
+
 def имя_системы() -> str:
     return "Windows" if WINDOWS else "macOS" if MACOS else "Linux"
 
