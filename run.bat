@@ -1,20 +1,24 @@
 @echo off
-rem Запуск управления рукой.
+rem ============================================================
+rem  SCARA - start the control window.
 rem
-rem   запустить.bat              с приводами и камерой
-rem   запустить.bat --simulate   без железа, посмотреть
+rem    run.bat              with drives and camera
+rem    run.bat --simulate   no hardware, just look at it
+rem
+rem  Plain ASCII on purpose: cmd.exe mangles non-ASCII in .bat files.
+rem ============================================================
 chcp 65001 >nul
 set PYTHONUTF8=1
 cd /d "%~dp0"
 
-if exist ".venv\Scripts\python.exe" goto :запуск
+if exist ".venv\Scripts\python.exe" goto start
 
 echo.
-echo   Окружение не создано. Сначала запустите установить.bat
+echo   Not installed yet. Run install.bat first.
 echo.
 pause
 exit /b 1
 
-:запуск
+:start
 .venv\Scripts\python.exe tools\arm_control.py %*
 if errorlevel 1 pause

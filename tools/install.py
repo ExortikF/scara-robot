@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,11 +54,19 @@ def шаг(номер: int, всего: int, текст: str) -> None:
     print(f"\n[{номер}/{всего}] {текст}")
 
 
-def выполнить(команда: list[str], что: str) -> bool:
-    """Запустить и, если не вышло, показать причину, а не просто код."""
+def выполнить(команда: list[str], что: str, *, тихо: bool = False) -> bool:
+    """Запустить и, если не вышло, показать причину, а не просто код.
+
+    ``тихо`` — для шагов, без которых можно жить. Их трассировка пугает
+    и прячет настоящую ошибку: в отчёте с Windows двенадцать строк
+    внутренностей pip выглядели как причина обвала, хотя обвалился
+    необязательный шаг, а настоящая беда была в питоне.
+    """
     готово = subprocess.run(команда, capture_output=True, text=True)
     if готово.returncode == 0:
         return True
+    if тихо:
+        return False
     print(f"  НЕ ВЫШЛО: {что}")
     хвост = (готово.stderr or готово.stdout or "").strip().splitlines()
     for строка in хвост[-12:]:
@@ -79,6 +88,29 @@ def проверить_питон() -> bool:
     разрядность = 64 if sys.maxsize > 2 ** 32 else 32
     print(f"  питон {platform.python_version()} "
           f"({platform.system()} {platform.machine()}, {разрядность} бит)")
+
+    # Предварительная версия питона — беда исподтишка. Формально это
+    # «3.12», проверка по номеру её пропускает, а внутри лежит pip из
+    # дня сборки альфы. Он падает на разборе собственных метаданных
+    # («InvalidVersion: Invalid version: '0.dev0'»), и дальше не
+    # ставится ничего — при том, что сообщение про сам питон ни слова
+    # не говорит. Под предварительные версии вдобавок почти нет готовых
+    # пакетов: их собирают под выпущенные.
+    if sys.version_info.releaselevel != "final":
+        метка = {"alpha": "альфа", "beta": "бета",
+                 "candidate": "release candidate"}.get(
+                     sys.version_info.releaselevel,
+                     sys.version_info.releaselevel)
+        print(f"  ЭТО ПРЕДВАРИТЕЛЬНАЯ ВЕРСИЯ ПИТОНА ({метка}) — "
+              f"она не годится.")
+        print("  В ней сломан встроенный pip: он падает на разборе своих же")
+        print("  метаданных с «InvalidVersion: Invalid version: '0.dev0'»,")
+        print("  и ни одна библиотека не ставится.")
+        print()
+        print("  Поставьте ВЫПУЩЕННУЮ версию с python.org — в списке "
+              "загрузок это")
+        print("  строки без пометок alpha, beta и rc.")
+        return False
 
     # 32 бита — самая частая беда на Windows, и по ошибке pip её не
     # опознать: он пишет «no matching distribution found for numpy», как
@@ -134,22 +166,51 @@ def проверить_питон() -> bool:
     return True
 
 
+def окружение_живое() -> bool:
+    """Работает ли pip в уже созданном окружении.
+
+    Проверяется именно pip, а не наличие файла. Окружение, созданное
+    сломанным питоном, выглядит целым: папка на месте, python.exe на
+    месте. Но pip в нём падает при первом же запуске, и установка
+    обрывается — а сообщение указывает на pip, не на окружение.
+    Переставить питон и запустить установку снова не помогает: старое
+    окружение переиспользуется вместе с поломкой.
+    """
+    питон = питон_окружения()
+    if not питон.is_file():
+        return False
+    готово = subprocess.run([str(питон), "-m", "pip", "--version"],
+                            capture_output=True, text=True)
+    return готово.returncode == 0
+
+
 def создать_окружение() -> bool:
-    if питон_окружения().is_file():
-        print(f"  окружение уже есть: {ОКРУЖЕНИЕ}")
-        return True
+    if ОКРУЖЕНИЕ.exists():
+        if окружение_живое():
+            print(f"  окружение уже есть и исправно: {ОКРУЖЕНИЕ}")
+            return True
+        print("  окружение есть, но pip в нём не работает — пересоздаю")
+        shutil.rmtree(ОКРУЖЕНИЕ, ignore_errors=True)
+
     print(f"  создаю {ОКРУЖЕНИЕ}")
     if not выполнить([sys.executable, "-m", "venv", str(ОКРУЖЕНИЕ)],
                      "не создалось окружение"):
         return False
-    return питон_окружения().is_file()
+    if not окружение_живое():
+        print("  окружение создано, но pip в нём не запускается.")
+        print("  Обычно это значит, что сам питон собран неудачно — "
+              "возьмите другой")
+        print("  с python.org.")
+        return False
+    return True
 
 
 def поставить_библиотеки() -> bool:
     питон = str(питон_окружения())
     print("  обновляю pip...")
-    выполнить([питон, "-m", "pip", "install", "--quiet", "--upgrade", "pip"],
-              "pip не обновился (не страшно)")
+    if not выполнить([питон, "-m", "pip", "install", "--quiet",
+                      "--upgrade", "pip"], "pip", тихо=True):
+        print("    не обновился — работаем с тем, что есть")
 
     print("  ставлю библиотеки, это несколько минут...")
     if not выполнить([питон, "-m", "pip", "install", "--quiet",
