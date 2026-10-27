@@ -2095,7 +2095,7 @@ def run_gui(loop, source, axes, arm_filter, args):
         elif loop.warning_text:
             status.config(text=loop.warning_text, foreground="#ffb648")
         elif not zeroed["value"]:
-            status.config(text="сначала «СЕРЕДИНА ЗДЕСЬ» — без неё "
+            status.config(text="сначала «РУКА ПРЯМАЯ» — без неё "
                                "приводы не поедут", foreground="#ffb648")
         elif (not paused["value"] and zeroed["value"]
               and time.monotonic() - state["last_target_ms"] > 2.0):
