@@ -84,6 +84,16 @@ class FollowConfig:
     #: задания скорости, и авария срабатывала бы на каждом подходе к краю.
     limit_margin_deg: float = 3.0
 
+    #: Дальше этого за пределом ось обратно НЕ везём, а встаём с аварией.
+    #:
+    #: Небольшой выход — перелёт или руку сдвинули при снятом моменте —
+    #: возвращается сам. Но угол, далеко ушедший за ход, механически
+    #: недостижим: значит, сбит ноль. Так было с локтем — энкодер сдвинулся
+    #: на оборот вала, программа видела 534° вместо −6° и везла ось
+    #: «обратно в пределы» через весь ход, прямо в железный упор.
+    #: None — без ограничения.
+    max_return_deg: float | None = None
+
     # ═══ МЕХАНИЧЕСКИЙ УПОР ═══
     #
     # Пределы выше отсчитываются от программного нуля и уезжают вместе с
@@ -477,6 +487,22 @@ class AngleFollower:
             target = self.clamp_motor(actual)
             error = self.angle_error(target, actual)
             self.out_of_range = abs(overshoot)
+
+            if (cfg.max_return_deg is not None
+                    and abs(overshoot) > cfg.max_return_deg):
+                self.drive.hold()
+                self._commanded_rpm = 0.0
+                self.fault = (
+                    f"положение {actual:.0f}° по валу — за пределом на "
+                    f"{abs(overshoot):.0f}°, так далеко ось уехать не могла. "
+                    f"Сбит ноль робота: «РАССЛАБИТЬ», выставить рычаги "
+                    f"прямо, «НОЛЬ РОБОТА».")
+                self.telemetry = Telemetry(
+                    target_deg=target, actual_deg=actual, error_deg=error,
+                    command_rpm=0, holding=True, raw_counts=raw,
+                    hold_reason="сбит ноль",
+                    passes=self.telemetry.passes + 1)
+                raise DriveFault(self.fault)
 
             # Авария поднимается, только если выход РАСТЁТ: значит ось не
             # возвращается, а продолжает уходить, и это уже настоящий отказ.

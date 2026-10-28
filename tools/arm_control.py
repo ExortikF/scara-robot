@@ -1408,6 +1408,9 @@ def axis_tolerance(args, axis: "ArmAxis") -> float:
     return max(wanted, floor)
 
 
+MAX_RETURN_JOINT_DEG = 30.0
+
+
 def axis_config(args, axis: ArmAxis) -> FollowConfig:
     """Настройки контура под конкретную ось.
 
@@ -1448,6 +1451,9 @@ def axis_config(args, axis: ArmAxis) -> FollowConfig:
         abs_min_deg=axis.abs_min_deg,
         abs_max_deg=axis.abs_max_deg,
         limit_margin_deg=args.limit_margin,
+        # Дальше 30° сустава за пределом ось сама не возвращается: такой
+        # угол значит сбитый ноль, а не перелёт.
+        max_return_deg=MAX_RETURN_JOINT_DEG * abs(axis.gear_ratio),
         runaway_passes=args.runaway_passes,
     )
     warning = config.check_tolerance()
@@ -2088,10 +2094,26 @@ def run_gui(loop, source, axes, arm_filter, args):
 
         robot_view.update(commanded[0], commanded[1], human_joints)
 
+        # Угол, далеко ушедший за ход, механически недостижим — значит сбит
+        # ноль. Говорим об этом сразу при открытии окна, а не после того,
+        # как человек нажмёт «ПРОДОЛЖИТЬ» и получит аварию.
+        сбит = []
+        for axis in axes:
+            follower = loop.followers[axis.name]
+            предел = follower.config.max_return_deg
+            вылет = follower.beyond_limit(follower.telemetry.actual_deg)
+            if предел is not None and abs(вылет) > предел:
+                сбит.append(f"{axis.name.split()[-1]} показывает "
+                            f"{axis.motor_to_joint(follower.telemetry.actual_deg):.0f}°")
+
         if loop.error_text:
             paused["value"] = True
             pause_button.config(text="ПРОДОЛЖИТЬ")
             status.config(text=loop.error_text, foreground="#e05252")
+        elif сбит:
+            status.config(text=f"СБИТ НОЛЬ: {', '.join(сбит)}. «РАССЛАБИТЬ», "
+                               f"выставить рычаги прямо, «НОЛЬ РОБОТА»",
+                          foreground="#e05252")
         elif loop.warning_text:
             status.config(text=loop.warning_text, foreground="#ffb648")
         elif not zeroed["value"]:
