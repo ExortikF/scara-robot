@@ -371,6 +371,56 @@ class AngleFollower:
         self._last_target_time = None
         self.reset_direction()
 
+    # --- ноль и потерянные обороты --------------------------------------
+
+    @property
+    def zero_offset_counts(self) -> int:
+        return self._zero_offset_counts
+
+    @zero_offset_counts.setter
+    def zero_offset_counts(self, value: int) -> None:
+        # Новый ноль — новая проверка оборота на ближайшем проходе.
+        self._zero_offset_counts = int(value)
+        self._turn_checked = False
+
+    def resolve_turn(self, raw: int) -> int:
+        """Восстановить потерянный оборот вала. Возвращает, на сколько сдвинули.
+
+        Энкодер помнит положение внутри оборота всегда, а счёт оборотов
+        может потерять при выключении питания. Так и было с локтем: в
+        сентябре вал остановился на 4.4°, а после выключения показал
+        −356° — то же место, но на оборот ниже. Через ремень 1:1.5 это
+        540° сустава, и контур повёз ось «обратно в пределы» через весь ход.
+
+        Если весь разрешённый ход вала короче оборота, в него попадает
+        ровно один вариант — его и берём, угадывать нечего. Если длиннее
+        (плечо с редуктором 10:1), вариантов несколько, и ноль не трогаем.
+        """
+        cfg = self.config
+        low, high = cfg.min_motor_deg, cfg.max_motor_deg
+        if cfg.circular or low is None or high is None:
+            return 0
+        margin = cfg.limit_margin_deg
+        if high - low + 2 * margin >= 360.0:
+            return 0
+        if not self.beyond_limit(self.counts_to_degrees(raw)):
+            return 0
+        base = self._zero_offset_counts
+        fits = []
+        for turns in range(-8, 9):
+            self._zero_offset_counts = base + turns * cfg.counts_per_rev
+            if not self.beyond_limit(self.counts_to_degrees(raw)):
+                fits.append(turns)
+        self._zero_offset_counts = base
+        if len(fits) != 1:
+            return 0
+        before = self.counts_to_degrees(raw)
+        self._zero_offset_counts = base + fits[0] * cfg.counts_per_rev
+        log.warning("потерян счёт оборотов: вал показывал %.0f°, восстановлено "
+                    "%.0f° (сдвиг %+d об.)", before,
+                    self.counts_to_degrees(raw), fits[0])
+        return fits[0]
+
     def set_zero_here(self) -> None:
         """Принять текущее положение за 0°."""
         self.zero_offset_counts = self.drive.read_position()
@@ -400,6 +450,9 @@ class AngleFollower:
     def _one_pass(self, last_direction: str | None) -> str | None:
         cfg = self.config
         raw = self.drive.read_position()
+        if not self._turn_checked:
+            self._turn_checked = True
+            self.resolve_turn(raw)
         actual = self.counts_to_degrees(raw)
         target = self._take_target()
         error = self.angle_error(target, actual)
