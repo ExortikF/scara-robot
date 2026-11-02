@@ -141,7 +141,7 @@ class HandSource:
         options = vision.HandLandmarkerOptions(
             # Строго CPU: на macOS Metal-делегат mediapipe роняет процесс.
             base_options=mp_tasks.BaseOptions(
-                model_asset_path=str(model),
+                model_asset_buffer=Path(model).read_bytes(),
                 delegate=mp_tasks.BaseOptions.Delegate.CPU),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=2,

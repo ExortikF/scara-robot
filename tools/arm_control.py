@@ -318,7 +318,7 @@ class PoseArmSource:
 
         options = vision.PoseLandmarkerOptions(
             base_options=mp_tasks.BaseOptions(
-                model_asset_path=str(model),
+                model_asset_buffer=Path(model).read_bytes(),
                 delegate=mp_tasks.BaseOptions.Delegate.CPU),
             running_mode=vision.RunningMode.VIDEO,
             num_poses=1,

@@ -55,7 +55,7 @@ def прогнать(кадры, вид: str, поворот: int, сторон�
 
     опции = vision.PoseLandmarkerOptions(
         base_options=tasks.BaseOptions(
-            model_asset_path=str(путь),
+            model_asset_buffer=Path(путь).read_bytes(),
             delegate=tasks.BaseOptions.Delegate.CPU),
         running_mode=vision.RunningMode.VIDEO, num_poses=1,
         min_pose_detection_confidence=0.5, min_tracking_confidence=0.5)

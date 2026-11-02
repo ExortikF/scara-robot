@@ -88,20 +88,15 @@ https://github.com/user-attachments/assets/ba809d6b-ba62-4079-94ff-202059283509
 
 ## Быстрый старт
 
-Нужен питон от 3.10 до 3.14 — [скачать](https://www.python.org/downloads/).
+**Windows 10/11 (64 бита).** Питон ставить заранее не нужно. Двойной щелчок по
+`install.bat` — он сам скачает и поставит Python 3.12 (только для текущего
+пользователя, без прав администратора), библиотеки, поддержку RealSense и модели,
+проверит окно и положит на рабочий стол ярлыки «SCARA robot» и «SCARA simulation».
+Голосовые команды — `install.bat --voice`. Пошагово: [УСТАНОВКА_WINDOWS.txt](УСТАНОВКА_WINDOWS.txt).
 
-На Windows обязательно **64-битный** (файл с пометкой «Windows installer
-(64-bit)»): под 32-битный нужных пакетов не выпускают, и установка
-обрывается на «no matching distribution found for numpy». При установке
-отметьте **Add Python to PATH** и **tcl/tk and IDLE**, а после установки
-закройте окно консоли и откройте заново — иначе `py` останется
-нераспознанной командой.
-
-**Windows.** Двойной щелчок по `install.bat`, потом по `run.bat`.
-
-Имена латиницей намеренно: cmd.exe не справляется с кириллицей внутри
-командных файлов и ломается на собственных метках — на настоящей машине
-это выглядело как `'_py' is not recognized`.
+Имена .bat латиницей и без кириллицы внутри намеренно: cmd.exe ломается на
+кириллице в командных файлах — на настоящей машине это выглядело как
+`'_py' is not recognized`.
 
 **macOS и Linux:**
 
@@ -114,12 +109,7 @@ https://github.com/user-attachments/assets/ba809d6b-ba62-4079-94ff-202059283509
 Занимает пару минут.
 
 Голосовые команды в базовую установку не входят — это ещё библиотека и
-87 МБ модели, а без них работает всё остальное. Кому нужно:
-
-```bash
-.venv/bin/pip install vosk sounddevice
-.venv/bin/python tools/setup_models.py --голос
-```
+45 МБ модели, а без них работает всё остальное. Кому нужно — ключ `--voice`.
 
 Посмотреть, ничего не подключая, — ключ `--simulate`: приводы заменяются
 программной моделью, камера не нужна.
@@ -127,8 +117,8 @@ https://github.com/user-attachments/assets/ba809d6b-ba62-4079-94ff-202059283509
 С железом:
 
 ```bash
-run.bat --confirm                    Windows
-./run_realsense.command                    macOS, камера RealSense
+run_realsense.bat                    Windows, камера RealSense
+./run_realsense.command              macOS, камера RealSense
 ```
 
 На Windows RealSense включается ключом `--realsense`, права

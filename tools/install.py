@@ -236,8 +236,18 @@ def поставить_библиотеки() -> bool:
     return True
 
 
-def скачать_модели(большая: bool) -> bool:
+def поставить_голос() -> bool:
+    """Библиотеки голосовых команд. Только по ключу --voice."""
+    print("  ставлю голосовые команды (vosk, sounddevice)...")
+    return выполнить([str(питон_окружения()), "-m", "pip", "install",
+                      "--quiet", "vosk", "sounddevice"],
+                     "голосовые библиотеки не встали")
+
+
+def скачать_модели(голос: bool, большая: bool) -> bool:
     команда = [str(питон_окружения()), str(КОРЕНЬ / "tools" / "setup_models.py")]
+    if голос:
+        команда.append("--голос")
     if большая:
         команда.append("--большая-модель-речи")
     # Без capture: у загрузки своя полоска, и прятать её незачем.
@@ -269,17 +279,59 @@ def проверить_работу() -> bool:
     return True
 
 
+def сделать_ярлыки() -> None:
+    """Два ярлыка на рабочем столе Windows: с роботом и без железа.
+
+    Папку рабочего стола спрашиваем у системы, а не собираем из имени
+    пользователя: её часто переносит OneDrive, и ярлык уехал бы в папку,
+    которой человек не видит. Имена ярлыков латиницей — так их точно
+    прочитает любая версия PowerShell.
+    """
+    ярлыки = [
+        ("SCARA robot", КОРЕНЬ / "run_realsense.bat", ""),
+        ("SCARA simulation", КОРЕНЬ / "run.bat", "--simulate"),
+    ]
+    def q(значение) -> str:
+        # В одинарных кавычках PowerShell апостроф пишется дважды.
+        return str(значение).replace("'", "''")
+
+    команды = ["$s = New-Object -ComObject WScript.Shell",
+               "$d = [Environment]::GetFolderPath('Desktop')"]
+    for имя, цель, ключи in ярлыки:
+        команды += [
+            f"$l = $s.CreateShortcut((Join-Path $d '{q(имя)}.lnk'))",
+            f"$l.TargetPath = '{q(цель)}'",
+            f"$l.Arguments = '{q(ключи)}'",
+            f"$l.WorkingDirectory = '{q(КОРЕНЬ)}'",
+            "$l.Save()",
+        ]
+    if выполнить(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                  "-Command", "; ".join(команды)],
+                 "ярлыки не создались", тихо=True):
+        print("  на рабочем столе: «SCARA robot» и «SCARA simulation»")
+    else:
+        print("  ярлыки не создались — запускайте run_realsense.bat и "
+              "run.bat из папки")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--большая-модель-речи", action="store_true",
-                   dest="большая",
+    # Латинские имена ключей — для install.bat: cmd.exe портит кириллицу,
+    # и «install.bat --голос» дошёл бы сюда нечитаемым.
+    p.add_argument("--voice", "--голос", action="store_true", dest="голос",
+                   help="ещё и голосовые команды: библиотеки и модель на "
+                        "90 МБ. Без них работает всё остальное")
+    p.add_argument("--big-voice", "--большая-модель-речи",
+                   action="store_true", dest="большая",
                    help="скачать ещё и большую модель распознавания речи "
                         "(1.9 ГБ). Без неё всё работает")
     p.add_argument("--без-проверки", action="store_true",
                    help="не проверять работу после установки")
     args = p.parse_args()
+    if args.большая:
+        args.голос = True        # большая модель без библиотеки бесполезна
 
     print("=" * 62)
     print("  Установка: SCARA, повторяющий движения руки")
@@ -298,9 +350,11 @@ def main() -> int:
     шаг(3, всего, "Ставлю библиотеки")
     if not поставить_библиотеки():
         return 1
+    if args.голос and not поставить_голос():
+        return 1
 
     шаг(4, всего, "Скачиваю модели распознавания")
-    if not скачать_модели(args.большая):
+    if not скачать_модели(args.голос, args.большая):
         return 1
 
     if not args.без_проверки:
@@ -309,12 +363,25 @@ def main() -> int:
             print("\nУстановилось, но проверка не прошла. Смотрите выше.")
             return 1
 
-    запуск = ("запустить.bat" if WINDOWS else "./запустить.command")
+    if WINDOWS:
+        сделать_ярлыки()
+
     print("\n" + "=" * 62)
     print("  Готово.")
     print("=" * 62)
-    print(f"\nЗапуск без железа, чтобы посмотреть:  {запуск} --simulate")
-    print(f"Запуск с приводами и камерой:         {запуск}")
+    if WINDOWS:
+        print("\nС роботом и камерой RealSense:  ярлык «SCARA robot»"
+              "  (или run_realsense.bat)")
+        print("Без железа, посмотреть:          ярлык «SCARA simulation»"
+              "  (или run.bat --simulate)")
+    else:
+        print("\nЗапуск без железа, чтобы посмотреть:  "
+              "./запустить.command --simulate")
+        print("Запуск с приводами и камерой:         ./run_realsense.command")
+    if not args.голос:
+        print("\nГолосовые команды не ставились. Добавить: "
+              + ("install.bat --voice" if WINDOWS
+                 else "./установить.command --voice"))
     print("\nВсе команды с пояснениями — в файле КОМАНДЫ.md")
     return 0
 
