@@ -133,14 +133,22 @@ def open_serial(port: str, **kwargs):
         # Порт занят: узел на месте, устройство живо, просто его уже
         # открыл кто-то другой. Путать это с отвалившимся кабелем нельзя —
         # советы получаются противоположные.
-        if getattr(exc, "errno", None) == errno.EBUSY or "Resource busy" in str(exc):
+        # На Windows занятый порт выглядит иначе: «Access is denied»,
+        # PermissionError 13. Без этой проверки занятый порт объявлялся
+        # отвалившимся переходником, и человек дёргал кабель вместо того,
+        # чтобы закрыть вторую программу.
+        текст = str(exc)
+        if (getattr(exc, "errno", None) in (errno.EBUSY, errno.EACCES)
+                or "Resource busy" in текст or "Access is denied" in текст
+                or "PermissionError" in текст):
             raise PortBusyError(
                 f"порт {port} занят другой программой.\n\n"
                 "Последовательный порт держит только одна программа за раз.\n"
                 "Чаще всего это:\n"
-                "  * монитор порта в Arduino IDE — закройте его;\n"
-                "  * ещё один запущенный скрипт с этим портом;\n"
-                "  * C30 Servo GUI, если речь про шину приводов."
+                "  * ещё одно окно этой же программы — закройте его;\n"
+                "    на Windows проверьте «Диспетчер задач»: python.exe;\n"
+                "  * C30 Servo GUI или другая программа настройки приводов;\n"
+                "  * монитор порта в Arduino IDE."
             ) from exc
         if not узел_на_месте(port):
             raise PortGoneError(
